@@ -6,7 +6,7 @@ Built as a single self-contained HTML file using [Three.js](https://threejs.org/
 
 ## Play
 
-Play it here: **https://YOURUSERNAME.github.io/REPONAME/**
+Play it here: **https://github.com/SteeVD/clean-rooms.git**
 
 *(Replace the link above with your own GitHub Pages URL once it's live.)*
 
