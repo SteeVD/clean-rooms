@@ -59,7 +59,11 @@
     flex-direction: column; align-items: center; justify-content: center;
     text-align: center; color: #009A44; background: rgba(40,44,48,0.95);
     padding: 24px;
+    overflow-y: auto; -webkit-overflow-scrolling: touch;
   }
+  /* when content is taller than the screen, anchor to top so nothing is clipped
+     above the fold and the whole thing can be scrolled */
+  .overlay > * { flex-shrink: 0; }
   .overlay h1 { font-size: 52px; letter-spacing: 6px; margin-bottom: 8px; font-weight: bold; }
   .overlay h1.fail { color: #d83a2a; }
   .overlay p { font-size: 15px; opacity: 0.75; max-width: 540px; line-height: 1.7; margin-bottom: 6px; }
@@ -94,6 +98,21 @@
   }
   .hidden { display: none !important; }
   #blocker { font-size: 11px; opacity: 0.4; margin-top: 22px; letter-spacing: 2px; }
+
+  /* Short screens (phones in landscape): compress the menus and anchor to the
+     top with scrolling so the heading and Start button are always reachable. */
+  @media (max-height: 520px) {
+    .overlay { justify-content: flex-start; padding: 14px 18px 28px; }
+    .overlay h1 { font-size: 30px; letter-spacing: 4px; margin-bottom: 4px; }
+    .overlay .sub { font-size: 10px; margin-bottom: 12px; }
+    .overlay p { font-size: 12px; line-height: 1.45; margin-bottom: 6px; max-width: 600px; }
+    .controls-grid { font-size: 11px; gap: 3px 14px; margin: 10px 0 14px; }
+    .btn { font-size: 13px; padding: 9px 26px; }
+    .btn + .btn { margin-top: 8px !important; }
+    #level-grid { gap: 6px; margin: 6px 0 12px; }
+    .lvl-cell { width: 42px; height: 42px; font-size: 15px; }
+    #blocker { margin-top: 12px; }
+  }
 
   /* ---- Touch controls (mobile only) ---- */
   #touch-ui { position: fixed; inset: 0; z-index: 12; pointer-events: none; display: none; }
@@ -1645,13 +1664,18 @@ function initTouch() {
     if (running && !paused && !transitioning) openPause();
   });
 
-  // orientation hint
+  // orientation hint — only nag during active gameplay, never over a menu
+  // (menus are made to fit either orientation, so let players read them as-is)
   function checkOrient() {
     const portrait = window.innerHeight > window.innerWidth;
-    document.getElementById('rotate-hint').classList.toggle('show', portrait);
+    const menuOpen = ['start','pause','gameover','levelselect','levelup']
+      .some(id => { const el = document.getElementById(id); return el && !el.classList.contains('hidden'); });
+    const show = portrait && IS_TOUCH && running && !menuOpen;
+    document.getElementById('rotate-hint').classList.toggle('show', show);
   }
   window.addEventListener('resize', checkOrient);
   window.addEventListener('orientationchange', checkOrient);
+  setInterval(checkOrient, 500);   // re-check as menus open/close
   checkOrient();
 }
 
