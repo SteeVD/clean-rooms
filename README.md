@@ -8,8 +8,6 @@ Built as a single self-contained HTML file using [Three.js](https://threejs.org/
 
 Play it here: **https://steevd.github.io/clean-rooms/**
 
-*(Replace the link above with your own GitHub Pages URL once it's live.)*
-
 Or download `index.html` and open it directly in any modern browser.
 
 ## Controls
