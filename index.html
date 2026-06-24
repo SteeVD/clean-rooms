@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>The Clean Rooms</title>
 <style>
+/* [[CSS-STYLES]] all game styling below */
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: 'Courier New', monospace; cursor: default;
     touch-action: none; -ms-touch-action: none; overscroll-behavior: none; -webkit-tap-highlight-color: transparent; }
@@ -244,6 +245,7 @@
 </style>
 </head>
 <body>
+<!-- [[HTML-BODY]] page markup: overlays, HUD, canvas -->
 <div id="game"></div>
 
 <div id="netdbg" style="position:fixed; bottom:6px; left:8px; z-index:30; color:#5fd07a; font-family:monospace; font-size:10px; background:rgba(0,0,0,0.5); padding:2px 6px; pointer-events:none; max-width:90vw; overflow:hidden;"></div>
@@ -251,6 +253,7 @@
   <div class="hud-block">
     <div id="level">LEVEL 1</div>
     <div id="level-label">DEPTH</div>
+    <div id="keycard-hud" style="font-size:13px;margin-top:8px;color:#36c0ff;letter-spacing:1px;"></div>
   </div>
   <div class="hud-block" style="text-align:right">
     <div id="zone">— BLUE ZONE —</div>
@@ -288,6 +291,7 @@
 </div>
 
 <!-- Start screen — styled as a Verumo facility access terminal -->
+<!-- [[HTML-START-MENU]] landing / corporate terminal -->
 <div id="start" class="overlay corp">
   <div class="corp-card">
     <!-- header bar: logo + status -->
@@ -385,6 +389,18 @@
         <select id="cfg-speed"><option value="0.7">Slow</option><option value="1" selected>Normal</option><option value="1.4">Fast</option><option value="1.8">Nightmare</option></select></div>
       <div class="cfg-row"><label>Fog density</label>
         <select id="cfg-fog"><option value="0.5">Light</option><option value="1" selected>Normal</option><option value="1.8">Heavy</option></select></div>
+      <div class="cfg-row"><label>Keycards to unlock exit</label>
+        <input id="cfg-keycards" type="number" min="0" max="6" value="1"></div>
+      <div class="cfg-row"><label>Biome</label>
+        <select id="cfg-biome">
+          <option value="random" selected>Random (from seed)</option>
+          <option value="cleanroom">Cleanroom</option>
+          <option value="cold">Cold Storage</option>
+          <option value="contaminated">Quarantine</option>
+          <option value="incinerator">Incineration</option>
+          <option value="flooded">Flooded Sub-level</option>
+          <option value="overgrowth">Overgrowth</option>
+        </select></div>
     </div>
     <div class="corp-divider"></div>
     <div class="corp-actions">
@@ -468,6 +484,7 @@
   <button id="select-back-btn" class="btn" style="margin-top:8px">Back</button>
 </div>
 
+<!-- [[IMPORTMAP]] CDN module map (three.js, firebase) -->
 <script type="importmap">
 { "imports": {
   "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js",
@@ -483,6 +500,31 @@ import {
   getDatabase, ref, set, get, update as dbUpdate, onValue, onDisconnect,
   remove, child, serverTimestamp
 } from 'firebase-database';
+
+// ============================================================
+// FILE MAP — search any [[TAG]] below to jump to that section.
+// (Ctrl+F the bracketed tag, e.g. [[ENTITY-AI]] )
+// ============================================================
+//   [[TEXTURES]]         PROCEDURAL TEXTURES
+//   [[BIOMES]]           BIOMES
+//   [[MAZE-GEN]]         MAZE GENERATION
+//   [[LEVEL-BUILD]]      LEVEL BUILD
+//   [[ENTITY-AI]]        THE ENTITY
+//   [[REMOTE-PLAYERS]]   REMOTE PLAYERS
+//   [[AUDIO]]            AUDIO
+//   [[SETUP]]            SETUP
+//   [[INPUT]]            INPUT
+//   [[EMOTES]]           EMOTE WHEEL
+//   [[BUG-LOGGER]]       BUG REPORT LOGGER
+//   [[KEYCARDS]]         KEYCARDS
+//   [[GLOWSTICKS]]       GLOWSTICKS
+//   [[CROUCH-HIDE]]      CROUCH + HIDE
+//   [[GAME-FLOW]]        GAME FLOW
+//   [[HUD-MINIMAP]]      HUD + MINIMAP
+//   [[MAIN-LOOP]]        MAIN LOOP
+//   [[BOOT]]             BOOT
+// ============================================================
+
 
 // --- Firebase (Realtime Database) ---
 const firebaseConfig = {
@@ -565,6 +607,7 @@ let hiding = false;          // tucked inside a locker (fully hidden if flashlig
 let hideSpot = null;         // the obstacle we're hidden in
 let savedPos = null;         // position to return to when leaving a hide spot
 let crouchOffset = 0;        // smoothed camera drop for crouching
+let isDowned = false;        // downed/crawling state (revive feature; wired next pass)
 const keys = {};
 let bobPhase = 0, lastStepBob = 0;
 
@@ -663,6 +706,8 @@ const customConfig = {
   monsters: 1,
   entitySpeed: 1,    // multiplier
   fog: 1,            // fog density multiplier
+  keycards: 1,       // keycards required per floor
+  biome: 'random',   // forced biome, or 'random' (seed-derived)
 };
 let entitySound = null;     // { panner, gain, osc... } spatial audio nodes
 
@@ -672,7 +717,7 @@ const fwd = new THREE.Vector3();
 const right = new THREE.Vector3();
 
 // ============================================================
-// PROCEDURAL TEXTURES (HTML5 canvas)
+// [[TEXTURES]] PROCEDURAL TEXTURES (HTML5 canvas)
 // ============================================================
 function noise2(x, y) {
   // cheap hashed value noise
@@ -714,7 +759,8 @@ function makeCarpet(variant) {
       r = r - mold * 0.9 - algae * 0.5 + water * 0.2;
       g = g - mold * 0.5 + algae * 0.4 + water * 0.2;
       b = b - mold * 0.8 - algae * 0.3 + water * 0.5;
-      d[i] = clamp8(r); d[i+1] = clamp8(g); d[i+2] = clamp8(b); d[i+3] = 255;
+      const ft = currentBiome.floorTint;
+      d[i] = clamp8(r*ft[0]); d[i+1] = clamp8(g*ft[1]); d[i+2] = clamp8(b*ft[2]); d[i+3] = 255;
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -756,7 +802,8 @@ function makeWallpaper(zone) {
         const m = t * t * (0.4 + patch * 0.8) * 150;
         r -= m * 0.85; g -= m * 0.45; b -= m * 0.8;    // dark green-black
       }
-      d[i] = clamp8(r); d[i+1] = clamp8(g); d[i+2] = clamp8(b); d[i+3] = 255;
+      const wt = currentBiome.wallTint;
+      d[i] = clamp8(r*wt[0]); d[i+1] = clamp8(g*wt[1]); d[i+2] = clamp8(b*wt[2]); d[i+3] = 255;
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -794,7 +841,8 @@ function makeCeiling() {
       const stain = noise2(x * 0.06 + 3, y * 0.06);
       let rr = v, gg = v, bb = v;
       if (stain > 0.7) { const s = (stain - 0.7) * 240; rr -= s*0.5; gg -= s*0.7; bb -= s; }
-      d[i] = clamp8(rr); d[i+1] = clamp8(gg); d[i+2] = clamp8(bb); d[i+3] = 255;
+      const ct = currentBiome.ceilTint;
+      d[i] = clamp8(rr*ct[0]); d[i+1] = clamp8(gg*ct[1]); d[i+2] = clamp8(bb*ct[2]); d[i+3] = 255;
     }
   }
   ctx.putImageData(img, 0, 0);
@@ -844,20 +892,503 @@ function makeCabinet() {
 
 function clamp8(v) { return v < 0 ? 0 : v > 255 ? 255 : v | 0; }
 
-// cached textures
-let TEX = {};
-function buildTextures() {
-  TEX.carpet = [makeCarpet(0), makeCarpet(1), makeCarpet(2)];
-  TEX.ceiling = makeCeiling();
-  // wood/cabinet textures no longer used — furniture is flat-shaded low-poly
-  TEX.wallBlue = makeWallpaper('blue');
-  TEX.wallGreen = makeWallpaper('green');
-  TEX.wallRed = makeWallpaper('red');
-  TEX.wallPlain = makeWallpaper('none');
+// ---- OVERGROWTH 3D scatter: vines, ferns, fungal clumps placed around the maze ----
+let overgrowthGroup = null;
+function scatterOvergrowth(maze) {
+  if (currentBiomeKey !== 'overgrowth') return;
+  const { idx } = mazeGrid, cells = mazeGrid.cells;
+
+  // depth-scaling: deeper overgrowth floors are more reclaimed (denser growth).
+  // factor ~0.6 at the shallowest overgrowth floor, ramping up with depth.
+  const depthF = Math.min(1.8, 0.6 + Math.max(0, level - 2) * 0.16);
+
+  // mark which cells are dark (near a dead light) for fungus context
+  const darkCell = {};
+  for (const fl of flickerLights) {
+    if (fl.dead) {
+      const dx = Math.floor(fl.mesh.position.x / CHUNK), dz = Math.floor(fl.mesh.position.z / CHUNK);
+      darkCell[dx + ',' + dz] = 1;
+    }
+  }
+
+  // We collect transform lists, then build ONE InstancedMesh per element type so
+  // hundreds of pieces cost a single draw call each.
+  const mossT = [], fernT = [], vineT = [], fungusT = [];
+  const dummy = new THREE.Object3D();
+  const pushT = (arr, x, y, z, ry, s, rx, rz) => {
+    dummy.position.set(x, y, z);
+    dummy.rotation.set(rx||0, ry||0, rz||0);
+    dummy.scale.set(s, s, s);
+    dummy.updateMatrix();
+    arr.push(dummy.matrix.clone());
+  };
+
+  // helper: which sides of a cell have walls -> gives us "inward" directions
+  function wallDirs(cx, cy) {
+    const m = cells[idx(cx, cy)];
+    const dirs = [];
+    if (m & 1) dirs.push([0, -1]);   // wall N
+    if (m & 2) dirs.push([0,  1]);   // wall S
+    if (m & 4) dirs.push([1,  0]);   // wall E
+    if (m & 8) dirs.push([-1, 0]);   // wall W
+    return dirs;
+  }
+
+  for (let cy = 0; cy < gridH; cy++) {
+    for (let cx = 0; cx < gridW; cx++) {
+      const wx = cx * CHUNK + CHUNK/2, wz = cy * CHUNK + CHUNK/2;
+      const walls = wallDirs(cx, cy);
+
+      // ---- MOSS MATS: clumps creeping inward from walls/corners ----
+      // more walls around a cell = more moss anchor points
+      for (const [dx, dz] of walls) {
+        if (lrand() > 0.7 * depthF) continue;
+        // anchor near that wall, a bit inset
+        const ax = wx + dx * (CHUNK/2 - 0.3) + (lrand()-0.5)*0.6;
+        const az = wz + dz * (CHUNK/2 - 0.3) + (lrand()-0.5)*0.6;
+        const radius = 0.5 + lrand() * 0.7;
+        const count = Math.floor((40 + lrand()*60) * depthF);
+        for (let i = 0; i < count; i++) {
+          const ang = lrand() * Math.PI * 2;
+          const dist = Math.sqrt(lrand()) * radius;
+          const mx = ax + Math.cos(ang) * dist;
+          const mz = az + Math.sin(ang) * dist;
+          const s = (1.0 - (dist / radius) * 0.5) * (0.7 + lrand()*0.5);
+          pushT(mossT, mx, lrand()*0.03, mz, lrand()*Math.PI, s);
+        }
+      }
+
+      // ---- FERNS: blade clumps against walls ----
+      if (walls.length && lrand() < 0.5 * depthF) {
+        const [dx, dz] = walls[(lrand()*walls.length)|0];
+        const fx = wx + dx * (CHUNK/2 - 0.4) + (lrand()-0.5)*0.5;
+        const fz = wz + dz * (CHUNK/2 - 0.4) + (lrand()-0.5)*0.5;
+        const blades = Math.floor((6 + lrand()*8) * depthF);
+        for (let b = 0; b < blades; b++) {
+          const ang = lrand() * Math.PI * 2, dd = Math.sqrt(lrand()) * 0.35;
+          const h = 0.35 + lrand()*0.6;
+          pushT(fernT, fx + Math.cos(ang)*dd, h/2, fz + Math.sin(ang)*dd, lrand()*Math.PI*2, h,
+                (lrand()-0.5)*0.5, (lrand()-0.5)*0.5);
+        }
+      }
+
+      // ---- HANGING VINES: near walls, from the ceiling ----
+      if (walls.length && lrand() < 0.55 * depthF) {
+        const [dx, dz] = walls[(lrand()*walls.length)|0];
+        const n = 1 + (lrand()*3|0);
+        for (let k = 0; k < n; k++) {
+          const vx = wx + dx * (CHUNK/2 - 0.25) + (lrand()-0.5)*0.7;
+          const vz = wz + dz * (CHUNK/2 - 0.25) + (lrand()-0.5)*0.7;
+          const len = 0.7 + lrand()*1.7;
+          // a vine is a column of small segments (instanced) hanging down
+          const segs = Math.max(3, Math.floor(len / 0.22));
+          for (let sgi = 0; sgi < segs; sgi++) {
+            const yy = WALL_H - (sgi + 0.5) * (len / segs);
+            const wob = Math.sin(sgi * 0.6) * 0.06;
+            pushT(vineT, vx + wob, yy, vz, 0, 1, 0, (lrand()-0.5)*0.15);
+          }
+        }
+      }
+
+      // ---- FUNGUS: glowing clusters, biased to DARK cells ----
+      const isDark = darkCell[cx + ',' + cy];
+      const fungusChance = (isDark ? 0.5 : 0.12) * depthF;
+      if (lrand() < fungusChance) {
+        const fx = wx + (lrand()-0.5)*CHUNK*0.7, fz = wz + (lrand()-0.5)*CHUNK*0.7;
+        const cnt = Math.floor((4 + lrand()*7) * depthF);
+        for (let f = 0; f < cnt; f++) {
+          const ang = lrand()*Math.PI*2, dd = Math.sqrt(lrand())*0.35;
+          const s = 0.5 + lrand()*0.9;
+          pushT(fungusT, fx + Math.cos(ang)*dd, 0.03 + lrand()*0.22, fz + Math.sin(ang)*dd, lrand()*Math.PI, s);
+        }
+      }
+    }
+  }
+
+  // build the instanced meshes
+  const g = new THREE.Group();
+  buildInstanced(g, new THREE.BoxGeometry(0.15, 0.05, 0.15),
+    new THREE.MeshStandardMaterial({ color: 0x243b29, roughness: 1.0, flatShading: true }), mossT);
+  buildInstanced(g, new THREE.PlaneGeometry(0.08, 1.0),
+    new THREE.MeshStandardMaterial({ color: 0x46883a, roughness: 0.85, flatShading: true, side: THREE.DoubleSide }), fernT);
+  buildInstanced(g, new THREE.BoxGeometry(0.05, 0.24, 0.05),
+    new THREE.MeshStandardMaterial({ color: 0x2c4a26, roughness: 0.9, flatShading: true }), vineT);
+  buildInstanced(g, new THREE.SphereGeometry(0.06, 6, 5),
+    new THREE.MeshStandardMaterial({ color: 0xc9d6a0, roughness: 0.7, flatShading: true, emissive: 0x2c4018, emissiveIntensity: 0.5 }), fungusT);
+
+  cellMeshGroup.add(g);
+  overgrowthGroup = g;
+}
+
+// build one InstancedMesh from a list of matrices and add it to a group
+function buildInstanced(group, geo, mat, transforms) {
+  if (!transforms.length) return;
+  const inst = new THREE.InstancedMesh(geo, mat, transforms.length);
+  for (let i = 0; i < transforms.length; i++) inst.setMatrixAt(i, transforms[i]);
+  inst.instanceMatrix.needsUpdate = true;
+  group.add(inst);
+}
+
+// ---- CRYO scatter: icicles (ceiling, near walls), frost patches (floor), ice sheets ----
+let cryoGroup = null;
+function scatterCryo(maze) {
+  if (currentBiomeKey !== 'cold') return;
+  const { idx } = mazeGrid, cells = mazeGrid.cells;
+  const depthF = Math.min(1.8, 0.6 + Math.max(0, level - 2) * 0.16);
+
+  const iceT = [], frostT = [], sheetT = [];
+  const dummy = new THREE.Object3D();
+  const pushT = (arr, x, y, z, ry, sx, sy, sz, rx, rz) => {
+    dummy.position.set(x, y, z);
+    dummy.rotation.set(rx||0, ry||0, rz||0);
+    dummy.scale.set(sx, sy==null?sx:sy, sz==null?sx:sz);
+    dummy.updateMatrix(); arr.push(dummy.matrix.clone());
+  };
+  function wallDirs(cx, cy) {
+    const m = cells[idx(cx, cy)]; const dirs = [];
+    if (m & 1) dirs.push([0,-1]); if (m & 2) dirs.push([0,1]);
+    if (m & 4) dirs.push([1,0]);  if (m & 8) dirs.push([-1,0]);
+    return dirs;
+  }
+
+  for (let cy = 0; cy < gridH; cy++) {
+    for (let cx = 0; cx < gridW; cx++) {
+      const wx = cx * CHUNK + CHUNK/2, wz = cy * CHUNK + CHUNK/2;
+      const walls = wallDirs(cx, cy);
+
+      // ICICLES hanging from ceiling, clustered near walls/corners (cold pools there)
+      if (walls.length && lrand() < 0.6 * depthF) {
+        const [dx, dz] = walls[(lrand()*walls.length)|0];
+        const n = 2 + (lrand()*4|0);
+        for (let k = 0; k < n; k++) {
+          const ix = wx + dx * (CHUNK/2 - 0.2) + (lrand()-0.5)*0.8;
+          const iz = wz + dz * (CHUNK/2 - 0.2) + (lrand()-0.5)*0.8;
+          const len = 0.25 + lrand()*0.7 * depthF;
+          // a downward cone scaled thin & long
+          pushT(iceT, ix, WALL_H - len/2, iz, lrand()*Math.PI, 1, len/0.4, 1);
+        }
+      }
+
+      // FROST PATCHES on the floor — clumps creeping from walls (like the moss)
+      for (const [dx, dz] of walls) {
+        if (lrand() > 0.6 * depthF) continue;
+        const ax = wx + dx * (CHUNK/2 - 0.3) + (lrand()-0.5)*0.6;
+        const az = wz + dz * (CHUNK/2 - 0.3) + (lrand()-0.5)*0.6;
+        const radius = 0.5 + lrand()*0.7;
+        const count = Math.floor((30 + lrand()*40) * depthF);
+        for (let i = 0; i < count; i++) {
+          const ang = lrand()*Math.PI*2, dist = Math.sqrt(lrand())*radius;
+          const s = (1 - (dist/radius)*0.5) * (0.6 + lrand()*0.5);
+          pushT(frostT, ax+Math.cos(ang)*dist, 0.012, az+Math.sin(ang)*dist, lrand()*Math.PI, s, 0.3, s);
+        }
+      }
+
+      // ICE SHEET: a flat frozen pool in the cell center sometimes
+      if (lrand() < 0.3 * depthF) {
+        const sz2 = 0.8 + lrand()*1.0;
+        pushT(sheetT, wx + (lrand()-0.5)*0.6, 0.008, wz + (lrand()-0.5)*0.6, lrand()*Math.PI, sz2, 1, sz2);
+      }
+    }
+  }
+
+  const g = new THREE.Group();
+  // icicle: a thin cone pointing down
+  const icicleGeo = new THREE.ConeGeometry(0.05, 0.4, 5); icicleGeo.rotateX(Math.PI);
+  buildInstanced(g, icicleGeo,
+    new THREE.MeshStandardMaterial({ color: 0xcfe8ff, roughness: 0.25, metalness: 0.1, transparent: true, opacity: 0.85, flatShading: true }), iceT);
+  buildInstanced(g, new THREE.BoxGeometry(0.14, 0.04, 0.14),
+    new THREE.MeshStandardMaterial({ color: 0xdcebf5, roughness: 0.6, flatShading: true }), frostT);
+  // ice sheet: a flat horizontal plane (rotate geometry to lie on the floor)
+  const sheetGeo = new THREE.PlaneGeometry(1, 1); sheetGeo.rotateX(-Math.PI/2);
+  buildInstanced(g, sheetGeo,
+    new THREE.MeshStandardMaterial({ color: 0xbcd8ec, roughness: 0.18, metalness: 0.2, transparent: true, opacity: 0.5, side: THREE.DoubleSide }), sheetT);
+  cellMeshGroup.add(g);
+  cryoGroup = g;
 }
 
 // ============================================================
-// MAZE GENERATION — Recursive Backtracker + room carving
+// [[BIOMES]] BIOMES — per-floor visual themes (palette / lighting / fog).
+// Each biome tints the procedural textures and sets the lighting mood. Biome is
+// seed-derived per floor (floor 1 always Cleanroom), so multiplayer agrees.
+// ============================================================
+const BIOMES = {
+  cleanroom: {
+    name: 'CLEANROOM',
+    floorTint: [1,1,1], wallTint: [1,1,1], ceilTint: [1,1,1],
+    fog: 0xb8c0c2, fogMul: 1,
+    bg: 0x9aa2a4, ambient: 0x9aa4ad, ambientI: 0.18,
+    lightColor: 0xfdfdff, deadRate: 0.30,
+  },
+  cold: {
+    name: 'COLD STORAGE',
+    floorTint: [0.8,0.9,1.05], wallTint: [0.82,0.92,1.08], ceilTint: [0.85,0.92,1.05],
+    fog: 0xbfd4e0, fogMul: 1.7,
+    bg: 0x8fa6b4, ambient: 0x9fc0d6, ambientI: 0.22,
+    lightColor: 0xcfe6ff, deadRate: 0.34,
+  },
+  contaminated: {
+    name: 'QUARANTINE',
+    floorTint: [0.92,1.0,0.7], wallTint: [0.95,1.02,0.7], ceilTint: [0.9,0.96,0.72],
+    fog: 0x9aa86a, fogMul: 1.5,
+    bg: 0x6f7a48, ambient: 0x8a9a55, ambientI: 0.16,
+    lightColor: 0xdfe6a0, deadRate: 0.5,
+  },
+  incinerator: {
+    name: 'INCINERATION',
+    floorTint: [1.05,0.78,0.62], wallTint: [1.0,0.72,0.58], ceilTint: [0.9,0.66,0.55],
+    fog: 0x4a2820, fogMul: 1.4,
+    bg: 0x3a201a, ambient: 0x6a3a28, ambientI: 0.14,
+    lightColor: 0xffb060, deadRate: 0.55,
+  },
+  flooded: {
+    name: 'FLOODED SUB-LEVEL',
+    floorTint: [0.7,0.92,0.95], wallTint: [0.72,0.9,0.92], ceilTint: [0.7,0.85,0.88],
+    fog: 0x16404a, fogMul: 2.1,
+    bg: 0x123038, ambient: 0x2a6a72, ambientI: 0.15,
+    lightColor: 0x9fe6ff, deadRate: 0.6,
+  },
+  overgrowth: {
+    name: 'OVERGROWTH',
+    floorTint: [0.78,1.0,0.72], wallTint: [0.8,1.02,0.74], ceilTint: [0.76,0.95,0.7],
+    fog: 0x3a5a30, fogMul: 1.6,
+    bg: 0x2c4423, ambient: 0x5a8a45, ambientI: 0.2,
+    lightColor: 0xd6f0b0, deadRate: 0.45,
+  },
+};
+const BIOME_POOL = ['cold','contaminated','incinerator','flooded','overgrowth'];
+let currentBiomeKey = 'cleanroom';
+let currentBiome = BIOMES.cleanroom;
+
+function resolveBiome() {
+  let key;
+  if (customConfig.active && customConfig.biome && customConfig.biome !== 'random') {
+    key = customConfig.biome;
+  } else if (level <= 1) {
+    key = 'cleanroom';   // floor 1 always the sterile cleanroom
+  } else {
+    // seed-derived pick from the pool (deterministic per floor)
+    key = BIOME_POOL[(lrand() * BIOME_POOL.length) | 0];
+  }
+  currentBiomeKey = key;
+  currentBiome = BIOMES[key] || BIOMES.cleanroom;
+}
+
+// multiply an [r,g,b] pixel by a biome tint triple
+function applyTint(r, g, b, tint) {
+  return [r * tint[0], g * tint[1], b * tint[2]];
+}
+
+// cached textures
+let TEX = {};
+function buildTextures() {
+  // dispose previous level's textures to avoid GPU memory growth
+  try {
+    if (TEX.carpet) TEX.carpet.forEach(t => t && t.dispose && t.dispose());
+    [TEX.ceiling, TEX.wallBlue, TEX.wallGreen, TEX.wallRed, TEX.wallPlain].forEach(t => t && t.dispose && t.dispose());
+  } catch (e) {}
+
+  const b = currentBiomeKey;
+  if (b === 'overgrowth') {
+    TEX.carpet = [makeOvergrowthFloor(0), makeOvergrowthFloor(1), makeOvergrowthFloor(2)];
+    TEX.ceiling = makeOvergrowthCeiling();
+    TEX.wallBlue = makeOvergrowthWall('blue');
+    TEX.wallGreen = makeOvergrowthWall('green');
+    TEX.wallRed = makeOvergrowthWall('red');
+    TEX.wallPlain = makeOvergrowthWall('none');
+  } else if (b === 'cold') {
+    TEX.carpet = [makeCryoFloor(0), makeCryoFloor(1), makeCryoFloor(2)];
+    TEX.ceiling = makeCryoCeiling();
+    TEX.wallBlue = makeCryoWall('blue');
+    TEX.wallGreen = makeCryoWall('green');
+    TEX.wallRed = makeCryoWall('red');
+    TEX.wallPlain = makeCryoWall('none');
+  } else {
+    TEX.carpet = [makeCarpet(0), makeCarpet(1), makeCarpet(2)];
+    TEX.ceiling = makeCeiling();
+    TEX.wallBlue = makeWallpaper('blue');
+    TEX.wallGreen = makeWallpaper('green');
+    TEX.wallRed = makeWallpaper('red');
+    TEX.wallPlain = makeWallpaper('none');
+  }
+}
+
+// ---- CRYO / COLD STORAGE texture painters: frost, ice sheen, condensation ----
+function makeCryoWall(zone) {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(256, 256); const d = img.data;
+  for (let y = 0; y < 256; y++) {
+    for (let x = 0; x < 256; x++) {
+      const i = (y * 256 + x) * 4;
+      // cold pale blue-white metal panel base
+      let r = 198, g = 212, b = 224;
+      const n = noise2(x * 0.8, y * 0.8) * 14 - 7; r += n; g += n; b += n;
+      // panel seams every 64px (vertical storage panels)
+      if (x % 64 < 2) { r -= 30; g -= 26; b -= 20; }
+      // frost rime building UP from the floor (bottom)
+      const fromFloor = Math.max(0, (y - 120) / 136);
+      const rime = noise2(x * 0.06, y * 0.06);
+      if (fromFloor > 0 && rime > 0.45) {
+        const amt = fromFloor * (rime - 0.45) * 2.4;
+        r += amt * 40; g += amt * 44; b += amt * 50;   // whiten with frost
+      }
+      // condensation streaks running DOWN from the top
+      const streak = noise2(x * 0.08, 0);
+      if (streak > 0.66) {
+        const reach = (streak - 0.66) * 3;
+        const t = Math.max(0, 1 - (y / 256) / Math.max(0.15, reach));
+        r -= t * 30; g -= t * 22; b -= t * 8;            // darker wet trail
+      }
+      // sparkly frost crystal flecks
+      if (noise2(x * 0.4 + 3, y * 0.4) > 0.9) { r += 40; g += 44; b += 48; }
+      d[i] = clamp8(r); d[i+1] = clamp8(g); d[i+2] = clamp8(b); d[i+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  if (zone !== 'none') {
+    let col = zone === 'blue' ? [60,120,210] : zone === 'green' ? [70,180,95] : [210,60,50];
+    ctx.fillStyle = `rgba(${col[0]},${col[1]},${col[2]},0.6)`;
+    for (let sx = 0; sx < 256; sx += 22) { if (noise2(sx*0.3,99) > 0.35) ctx.fillRect(sx, 212, 14, 10); }
+  }
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t;
+}
+
+function makeCryoFloor(variant) {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(256, 256); const d = img.data;
+  for (let y = 0; y < 256; y++) {
+    for (let x = 0; x < 256; x++) {
+      const i = (y * 256 + x) * 4;
+      // pale icy concrete with a faint blue sheen
+      let r = 176, g = 190, b = 202;
+      const n = noise2(x * 0.7 + variant*4, y * 0.7) * 16 - 8; r += n; g += n; b += n;
+      // frozen puddle patches — smoother, bluer, slightly darker ice
+      const ice = noise2(x * 0.03, y * 0.03);
+      if (ice > 0.58) {
+        const t = (ice - 0.58) * 2.2;
+        r -= t * 24; g -= t * 8; b += t * 18;            // bluish ice sheet
+        // crack lines across the ice
+        if (Math.abs(noise2(x*0.2, y*0.2) - 0.5) < 0.04) { r -= 30; g -= 26; b -= 14; }
+      }
+      // frost dusting flecks
+      if (noise2(x * 0.35, y * 0.35 + 9) > 0.88) { r += 36; g += 40; b += 44; }
+      d[i] = clamp8(r); d[i+1] = clamp8(g); d[i+2] = clamp8(b); d[i+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t;
+}
+
+function makeCryoCeiling() {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(128, 128); const d = img.data;
+  for (let y = 0; y < 128; y++) {
+    for (let x = 0; x < 128; x++) {
+      const i = (y * 128 + x) * 4;
+      // pale frosted ceiling with metal grid
+      let v = 200 + noise2(x, y) * 22 - 11;
+      let rr = v*0.95, gg = v*0.98, bb = v*1.04;
+      if (x < 4 || x > 123 || y < 4 || y > 123) { rr -= 50; gg -= 46; bb -= 38; }
+      // frost bloom patches
+      const frost = noise2(x * 0.05 + 2, y * 0.05);
+      if (frost > 0.68) { const f = (frost - 0.68)*3; rr += f*30; gg += f*34; bb += f*40; }
+      d[i] = clamp8(rr); d[i+1] = clamp8(gg); d[i+2] = clamp8(bb); d[i+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t;
+}
+
+// ---- OVERGROWTH texture painters: reclaimed-by-nature surfaces ----
+// vines/roots creeping in lines, moss patches, leaf litter — distinct *patterns*,
+// not just a green tint over the clean textures.
+function makeOvergrowthWall(zone) {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(256, 256); const d = img.data;
+  for (let y = 0; y < 256; y++) {
+    for (let x = 0; x < 256; x++) {
+      const i = (y * 256 + x) * 4;
+      // damp, stained concrete base (greyer & darker than cleanroom drywall)
+      let r = 150, g = 156, b = 142;
+      const n = noise2(x * 0.8, y * 0.8) * 18 - 9; r += n; g += n; b += n;
+      // moss creeping up from the floor (bottom) and in blotches
+      const moss = noise2(x * 0.04, y * 0.04);
+      const fromFloor = Math.max(0, (y - 90) / 166);
+      const mossAmt = Math.max(0, (moss - 0.5)) * 2 * (0.3 + fromFloor * 1.1);
+      if (mossAmt > 0) { r -= mossAmt * 70; g -= mossAmt * 10; b -= mossAmt * 75; }
+      // vines: vertical-ish wandering dark-green lines
+      const vineCol = Math.sin(x * 0.12 + noise2(x*0.02, y*0.05) * 6);
+      if (vineCol > 0.86) {
+        const wob = noise2(x * 0.3, y * 0.08);
+        if (wob > 0.35) { r -= 60; g -= 18; b -= 64; }
+      }
+      // little leaf flecks
+      if (noise2(x * 0.25 + 7, y * 0.25) > 0.85) { r -= 20; g += 18; b -= 25; }
+      d[i] = clamp8(r); d[i+1] = clamp8(g); d[i+2] = clamp8(b); d[i+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  // keep the faded zone tape so navigation still works
+  if (zone !== 'none') {
+    let col = zone === 'blue' ? [60,120,210] : zone === 'green' ? [70,180,95] : [210,60,50];
+    ctx.fillStyle = `rgba(${col[0]},${col[1]},${col[2]},0.55)`;
+    for (let sx = 0; sx < 256; sx += 22) { if (noise2(sx*0.3,99) > 0.4) ctx.fillRect(sx, 212, 14, 10); }
+  }
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t;
+}
+
+function makeOvergrowthFloor(variant) {
+  const c = document.createElement('canvas'); c.width = c.height = 256;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(256, 256); const d = img.data;
+  for (let y = 0; y < 256; y++) {
+    for (let x = 0; x < 256; x++) {
+      const i = (y * 256 + x) * 4;
+      // mossy, dirt-strewn floor — green-brown, organic, no clean tile grid
+      let r = 96, g = 112, b = 74;
+      const n = noise2(x * 0.6 + variant*3, y * 0.6) * 22 - 11; r += n; g += n; b += n;
+      // moss mats
+      const moss = noise2(x * 0.035, y * 0.035);
+      if (moss > 0.5) { const m = (moss - 0.5) * 2; r -= m*40; g += m*28; b -= m*30; }
+      // dirt/leaf-litter patches
+      const dirt = noise2(x * 0.06 + 11, y * 0.06);
+      if (dirt > 0.66) { const dd2 = (dirt-0.66)*3; r += dd2*40; g += dd2*22; b += dd2*8; }
+      // scattered leaf flecks
+      if (noise2(x*0.3, y*0.3) > 0.88) { r -= 18; g += 22; b -= 20; }
+      d[i] = clamp8(r); d[i+1] = clamp8(g); d[i+2] = clamp8(b); d[i+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t;
+}
+
+function makeOvergrowthCeiling() {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(128, 128); const d = img.data;
+  for (let y = 0; y < 128; y++) {
+    for (let x = 0; x < 128; x++) {
+      const i = (y * 128 + x) * 4;
+      // broken ceiling: dark with holes where greenish daylight/roots break through
+      let v = 90 + noise2(x, y) * 24 - 12;
+      let rr = v*0.8, gg = v*0.85, bb = v*0.7;
+      // breakthrough patches: brighter green where growth/light comes in
+      const hole = noise2(x * 0.05 + 4, y * 0.05);
+      if (hole > 0.72) { const h = (hole - 0.72) * 3; rr += h*30; gg += h*70; bb += h*25; }
+      // hanging root tendrils (dark)
+      if (noise2(x*0.5, y*0.12) > 0.8) { rr -= 30; gg -= 20; bb -= 28; }
+      d[i] = clamp8(rr); d[i+1] = clamp8(gg); d[i+2] = clamp8(bb); d[i+3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  const t = new THREE.CanvasTexture(c); t.wrapS = t.wrapT = THREE.RepeatWrapping; return t;
+}
+
+// ============================================================
+// [[MAZE-GEN]] MAZE GENERATION — Recursive Backtracker + room carving
 // ============================================================
 
 // --- Seeded RNG (mulberry32) for deterministic world generation ---
@@ -972,7 +1503,7 @@ function computeDistances(maze) {
 }
 
 // ============================================================
-// LEVEL BUILD (3D geometry from logical maze)
+// [[LEVEL-BUILD]] LEVEL BUILD (3D geometry from logical maze)
 // ============================================================
 function zoneForDist(d) {
   if (maxDist <= 0) return 'blue';
@@ -995,12 +1526,18 @@ function buildLevel() {
   emoteBubbles.length = 0; emotePings.length = 0;   // bubbles lived in the old group
   closeEmoteWheel(false);
   clearAllGlowsticks();   // glowsticks lived in the old group; net listener re-adds
+  clearAllKeycards();
   cellMeshGroup = new THREE.Group();
   scene.add(cellMeshGroup);
 
   // Deterministic per-level seed: every client sharing `worldSeed` builds the
   // identical level for a given level number. (mixed so adjacent levels differ.)
   seedRng((worldSeed ^ Math.imul(level + 1, 0x9E3779B1)) >>> 0);
+
+  // resolve which biome this floor uses (seed-derived; floor 1 always Cleanroom)
+  resolveBiome();
+  // (re)build textures for this biome — each biome paints its surfaces differently
+  buildTextures();
 
   // grid size scales with level — starts tiny and forgiving, ramps gradually.
   // L1:7  L2:9  L3:11  L4:13 ... capped at 35.
@@ -1074,30 +1611,37 @@ function buildLevel() {
     }
   }
 
-  // ---- Overhead fluorescents: cool white, denser coverage, many failed ----
+  // ---- Overhead fluorescents: biome-tinted, many failed ----
   const lightCount = Math.floor(gridW * gridH * 0.10) + 5;
+  const lc = currentBiome.lightColor, deadRate = currentBiome.deadRate;
   for (let n = 0; n < lightCount; n++) {
     const gx = (lrand() * gridW) | 0;
     const gy = (lrand() * gridH) | 0;
     const lx = gx * CHUNK + CHUNK / 2;
     const lz = gy * CHUNK + CHUNK / 2;
-    const dead = lrand() < 0.30;      // ~30% completely dead -> dark pools
+    const dead = lrand() < deadRate;
     const glitch = !dead && lrand() < 0.45;
     const fixture = new THREE.Mesh(
       new THREE.BoxGeometry(1.5, 0.06, 0.55),
-      new THREE.MeshBasicMaterial({ color: dead ? 0x3a4042 : 0xf2f6ff })
+      new THREE.MeshBasicMaterial({ color: dead ? 0x3a4042 : lc })
     );
     fixture.position.set(lx, WALL_H - 0.06, lz);
     cellMeshGroup.add(fixture);
     const base = dead ? 0 : 1.25;
-    const pl = new THREE.PointLight(0xeaf2ff, base, CHUNK * 3.6, 2);
+    const pl = new THREE.PointLight(lc, base, CHUNK * 3.6, 2);
     pl.position.set(lx, WALL_H - 0.3, lz);
     cellMeshGroup.add(pl);
     flickerLights.push({ light: pl, mesh: fixture, base, glitch, dead, t: Math.random() * 10 });
   }
 
+  // biome ambient light (set per floor)
+  if (ambientLight) { ambientLight.color = new THREE.Color(currentBiome.ambient); ambientLight.intensity = currentBiome.ambientI; }
+
+
   // ---- Furniture & storage in open rooms ----
   placeFurniture(maze);
+  scatterOvergrowth(maze);   // overgrowth biome: add vines/ferns/fungus
+  scatterCryo(maze);         // cold biome: add icicles/frost/ice sheets
 
   // ---- Emergency exit at the deepest dead-end ----
   buildGateway(maze);
@@ -1106,10 +1650,10 @@ function buildLevel() {
   pos.set(spawnCell.x * CHUNK + CHUNK / 2, EYE_H, spawnCell.y * CHUNK + CHUNK / 2);
   velY = 0; onGround = true; yaw = Math.random() * Math.PI * 2; pitch = 0;
 
-  // thin pale clinical haze (limits sight without dungeon gloom)
-  const fogDensity = 0.11 * (customConfig.active ? customConfig.fog : 1);
-  scene.fog = new THREE.FogExp2(0xb8c0c2, fogDensity);
-  scene.background = new THREE.Color(0x9aa2a4);
+  // biome-driven haze + background colour
+  const fogDensity = 0.11 * currentBiome.fogMul * (customConfig.active ? customConfig.fog : 1);
+  scene.fog = new THREE.FogExp2(currentBiome.fog, fogDensity);
+  scene.background = new THREE.Color(currentBiome.bg);
 }
 
 function addWall(cx, cz, isEW, geo, mat) {
@@ -1448,7 +1992,7 @@ function disposeGroup(group) {
 }
 
 // ============================================================
-// THE ENTITY — roaming pursuer with BFS pathfinding + spatial audio
+// [[ENTITY-AI]] THE ENTITY — roaming pursuer with BFS pathfinding + spatial audio
 // ============================================================
 
 // BFS distance field FROM a given cell, respecting wall bitmask.
@@ -1522,7 +2066,7 @@ function buildEntityMesh() {
 }
 
 // ============================================================
-// REMOTE PLAYERS (multiplayer avatars)
+// [[REMOTE-PLAYERS]] REMOTE PLAYERS (multiplayer avatars)
 // ============================================================
 const remotePlayers = {};   // id -> { group, parts, target:{x,z,yaw}, name, level, flash }
 
@@ -1718,9 +2262,14 @@ function stepDownhill(field) {
 }
 
 function stepDownhillFor(e, field) {
+  return stepDownhillFromCell(e.cell, field);
+}
+
+// downhill neighbour from an arbitrary cell along a BFS field
+function stepDownhillFromCell(cell, field) {
   const { idx } = mazeGrid;
   const cells = mazeGrid.cells;
-  const ex = e.cell.x, ey = e.cell.y;
+  const ex = cell.x, ey = cell.y;
   const here = idx(ex, ey);
   const cur = field[here];
   if (cur <= 0) return null;
@@ -1734,6 +2283,31 @@ function stepDownhillFor(e, field) {
     if (nd >= 0 && nd < bestD) { bestD = nd; bestC = { x: nx, y: ny }; }
   }
   return bestC;
+}
+
+// is the straight segment from (x1,z1) to (x2,z2) free of walls? sampled coarsely.
+function clearLineBetween(x1, z1, x2, z2) {
+  const steps = 6;
+  let pcx = Math.floor(x1 / CHUNK), pcz = Math.floor(z1 / CHUNK);
+  for (let i = 1; i <= steps; i++) {
+    const t = i / steps;
+    const sx = x1 + (x2 - x1) * t, sz = z1 + (z2 - z1) * t;
+    const cxn = Math.floor(sx / CHUNK), czn = Math.floor(sz / CHUNK);
+    if (cxn === pcx && czn === pcz) continue;
+    // moving between adjacent cells — check the wall between them
+    const { idx } = mazeGrid, cells = mazeGrid.cells;
+    if (pcx < 0 || pcz < 0 || cxn < 0 || czn < 0 || pcx >= gridW || pcz >= gridH || cxn >= gridW || czn >= gridH) return false;
+    const here = idx(pcx, pcz);
+    const ddx = cxn - pcx, ddz = czn - pcz;
+    // diagonal move can't be validated simply -> treat as blocked
+    if (ddx !== 0 && ddz !== 0) return false;
+    let wallBit = 0;
+    if (ddz === -1) wallBit = 1; else if (ddz === 1) wallBit = 2;
+    else if (ddx === 1) wallBit = 4; else if (ddx === -1) wallBit = 8;
+    if (cells[here] & wallBit) return false;
+    pcx = cxn; pcz = czn;
+  }
+  return true;
 }
 
 function entityWanderCellFor(e) {
@@ -1753,7 +2327,23 @@ function entityWanderCellFor(e) {
 }
 
 // Gather every player's world position (mine + remote avatars), for nearest-target
-// and multi-player catch logic. Returns [{id, x, z, flash}], me first.
+// and multi-player catch logic. Also tracks each player's velocity so the entity
+// can predict where they're heading (interception).
+const _playerVel = {};   // id -> {x, z, px, pz}
+function trackPlayerVelocities(dt) {
+  if (dt <= 0) return;
+  const upd = (id, x, z) => {
+    const v = _playerVel[id] || (_playerVel[id] = { x: 0, z: 0, px: x, pz: z });
+    // smoothed velocity (cells/sec-ish in world units)
+    const vx = (x - v.px) / dt, vz = (z - v.pz) / dt;
+    v.x += (vx - v.x) * Math.min(1, dt * 6);
+    v.z += (vz - v.z) * Math.min(1, dt * 6);
+    v.px = x; v.pz = z;
+  };
+  if (!iAmCaught) upd(myId || 'me', pos.x, pos.z);
+  for (const id in remotePlayers) upd(id, remotePlayers[id].cur.x, remotePlayers[id].cur.z);
+}
+
 function allPlayerPositions() {
   const list = [];
   if (!iAmCaught && !isConcealed()) list.push({ id: myId || 'me', x: pos.x, z: pos.z, flash: flashlightOn, crouch: crouching, isMe: true });
@@ -1767,11 +2357,24 @@ function allPlayerPositions() {
   return list;
 }
 
+// predict a cell a little ahead of the player based on their velocity
+function predictedCell(p, lead) {
+  const v = _playerVel[p.id];
+  let tx = p.x, tz = p.z;
+  if (v) { tx += v.x * lead; tz += v.z * lead; }
+  let gx = Math.floor(tx / CHUNK), gy = Math.floor(tz / CHUNK);
+  gx = Math.max(0, Math.min(gridW - 1, gx));
+  gy = Math.max(0, Math.min(gridH - 1, gy));
+  return { x: gx, y: gy };
+}
+
 function updateEntity(dt) {
   if (!entities.length) return;
   const hostSim = (netMode === 'single') || isHost;
 
   if (hostSim) {
+    trackPlayerVelocities(dt);
+    assignEntityTargets();
     for (const e of entities) updateEntityAI(e, dt);
     if (netMode !== 'single') broadcastEntity();   // multiplayer still syncs entities[0]
   } else {
@@ -1782,21 +2385,47 @@ function updateEntity(dt) {
   updateEntityDanger();
 }
 
-// host-only: full AI for one entity, targeting the NEAREST living player
-function updateEntityAI(e, dt) {
+// Coordination: assign each hunting entity a role. The closest entity to a player
+// chases directly; additional entities targeting the same player try to CUT OFF
+// (aim further ahead of the player) so they flank rather than form a conga line.
+function assignEntityTargets() {
   const players = allPlayerPositions();
-  let tgt = players[0], best = Infinity;
-  for (const p of players) {
-    const dxp = p.x - e.pos.x, dzp = p.z - e.pos.z;
-    const dd = dxp*dxp + dzp*dzp;
-    if (dd < best) { best = dd; tgt = p; }
+  // count how many entities are already committed to each player id
+  const committed = {};
+  for (const e of entities) {
+    // pick nearest player for this entity
+    let tgt = players[0], best = Infinity;
+    for (const p of players) {
+      const dd = (p.x - e.pos.x)**2 + (p.z - e.pos.z)**2;
+      if (dd < best) { best = dd; tgt = p; }
+    }
+    e._tgt = tgt;
+    const rank = committed[tgt.id] = (committed[tgt.id] || 0) + 1;
+    // first chaser leads (short lead); extra chasers cut off further ahead
+    e._lead = rank === 1 ? 0.35 : 0.35 + rank * 0.9;
   }
-  const targetCellX = Math.floor(tgt.x / CHUNK), targetCellY = Math.floor(tgt.z / CHUNK);
+}
+
+// host-only: full AI for one entity
+function updateEntityAI(e, dt) {
+  const tgt = e._tgt || allPlayerPositions()[0];
+
+  // The player's ACTUAL cell is the reliable chase target. Prediction only nudges
+  // the goal a bit ahead — and we discard the prediction if it would land on the
+  // entity's own cell (which would leave it with nowhere downhill to go = stall).
+  const trueCX = Math.max(0, Math.min(gridW-1, Math.floor(tgt.x / CHUNK)));
+  const trueCY = Math.max(0, Math.min(gridH-1, Math.floor(tgt.z / CHUNK)));
+  const predCell = predictedCell(tgt, e._lead || 0.35);
+  let targetCellX = predCell.x, targetCellY = predCell.y;
+  // if the prediction lands on the entity's own cell, chase the player's true cell
+  if (targetCellX === e.cell.x && targetCellY === e.cell.y) { targetCellX = trueCX; targetCellY = trueCY; }
 
   e.repathTimer -= dt;
-  if (!e.field || e.repathTimer <= 0) {
+  const targetMoved = !e._fieldTarget || e._fieldTarget.x !== targetCellX || e._fieldTarget.y !== targetCellY;
+  if (!e.field || e.repathTimer <= 0 || targetMoved) {
     e.field = bfsFrom(targetCellX, targetCellY);
-    e.repathTimer = 0.35;
+    e.repathTimer = 0.3;
+    e._fieldTarget = { x: targetCellX, y: targetCellY };
   }
 
   const distCells = e.field[mazeGrid.idx(e.cell.x, e.cell.y)];
@@ -1807,7 +2436,7 @@ function updateEntityAI(e, dt) {
 
   if (senses) {
     e.state = 'hunt';
-    e.lastKnown = { x: targetCellX, y: targetCellY };
+    e.lastKnown = { x: trueCX, y: trueCY };
     e.searchTimer = 4.5;
   } else if (e.state === 'hunt') {
     e.state = 'search';
@@ -1817,12 +2446,37 @@ function updateEntityAI(e, dt) {
     if (atLast || e.searchTimer <= 0) { e.state = 'wander'; e.lastKnown = null; }
   }
 
+  // --- anti-stall watchdog: if we've barely moved while hunting/searching for a
+  // while, the entity is wedged (its logical cell drifted from its real position,
+  // or it's grinding a wall corner). Resync its cell to where it actually is and
+  // force a fresh valid step toward the player. ---
+  e._stuckCheck = (e._stuckCheck || 0) + dt;
+  if (e._stuckCheck > 0.5) {
+    const moved = Math.hypot(e.pos.x - (e._lastStuckX ?? e.pos.x), e.pos.z - (e._lastStuckZ ?? e.pos.z));
+    if (moved < 0.12 && e.state !== 'wander') {
+      // 1) resync the logical cell to the entity's REAL world position
+      const realCX = Math.max(0, Math.min(gridW-1, Math.floor(e.pos.x / CHUNK)));
+      const realCY = Math.max(0, Math.min(gridH-1, Math.floor(e.pos.z / CHUNK)));
+      e.cell = { x: realCX, y: realCY };
+      // 2) snap position to that cell's center so it's cleanly inside a cell, not
+      //    pinned against a wall corner
+      e.pos.x = realCX * CHUNK + CHUNK / 2;
+      e.pos.z = realCY * CHUNK + CHUNK / 2;
+      // 3) repath from the true cell and take a guaranteed-valid neighbour step
+      e.field = bfsFrom(trueCX, trueCY);
+      e._fieldTarget = { x: trueCX, y: trueCY };
+      const w = stepDownhillFor(e, e.field) || entityWanderCellFor(e);
+      if (w) e.targetCell = w; else e.targetCell = { x: realCX, y: realCY };
+    }
+    e._lastStuckX = e.pos.x; e._lastStuckZ = e.pos.z; e._stuckCheck = 0;
+  }
+
   const tcx = e.targetCell.x * CHUNK + CHUNK / 2;
   const tcz = e.targetCell.y * CHUNK + CHUNK / 2;
-  const reached = Math.abs(e.pos.x - tcx) < 0.08 && Math.abs(e.pos.z - tcz) < 0.08;
+  // pick the next cell once we're reasonably near the current target center
+  const reached = Math.abs(e.pos.x - tcx) < 0.25 && Math.abs(e.pos.z - tcz) < 0.25;
 
   if (reached) {
-    e.cell = { ...e.targetCell };
     let next = null;
     if (e.state === 'hunt') {
       next = stepDownhillFor(e, e.field) || entityWanderCellFor(e);
@@ -1835,8 +2489,12 @@ function updateEntityAI(e, dt) {
     if (next) e.targetCell = next;
   }
 
+  // steer straight toward the current target cell center. (We removed aggressive
+  // corner-cutting: it could send the entity across a wall corner and wedge it.
+  // The gradual heading lerp below still keeps motion looking smooth.)
   const destX = e.targetCell.x * CHUNK + CHUNK / 2;
   const destZ = e.targetCell.y * CHUNK + CHUNK / 2;
+
   const dx = destX - e.pos.x, dz = destZ - e.pos.z;
   const d = Math.hypot(dx, dz);
   const moveScale = e.state === 'hunt' ? 1 : e.state === 'search' ? 0.8 : 0.5;
@@ -1851,8 +2509,11 @@ function updateEntityAI(e, dt) {
     let diff = targetHeading - e.heading;
     while (diff > Math.PI) diff -= Math.PI * 2;
     while (diff < -Math.PI) diff += Math.PI * 2;
-    e.heading += diff * Math.min(1, dt * 6);
+    e.heading += diff * Math.min(1, dt * 7);
   }
+  // keep the logical cell honest with the real position (prevents drift/wedging)
+  e.cell.x = Math.max(0, Math.min(gridW-1, Math.floor(e.pos.x / CHUNK)));
+  e.cell.y = Math.max(0, Math.min(gridH-1, Math.floor(e.pos.z / CHUNK)));
 
   animateEntityMesh(e, dt, e._movedFrac);
 
@@ -1863,7 +2524,7 @@ function updateEntityAI(e, dt) {
       if (pdx*pdx + pdz*pdz < 0.7*0.7) caughtByEntity();
     }
   } else {
-    for (const p of players) {
+    for (const p of allPlayerPositions()) {
       const pdx = e.pos.x - p.x, pdz = e.pos.z - p.z;
       if (pdx*pdx + pdz*pdz < 0.7*0.7) {
         if (p.isMe) { if (!isConcealed()) caughtByEntity(); }
@@ -2084,7 +2745,7 @@ function collideAxis(nx, nz, useX) {
 }
 
 // ============================================================
-// AUDIO — generative dark ambient + footsteps (Web Audio)
+// [[AUDIO]] AUDIO — generative dark ambient + footsteps (Web Audio)
 // ============================================================
 function initAudio() {
   if (audio) return;
@@ -2217,7 +2878,7 @@ function audioUpdate(dt) {
 }
 
 // ============================================================
-// SETUP
+// [[SETUP]] SETUP
 // ============================================================
 function initThree() {
   renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
@@ -2249,10 +2910,10 @@ function onResize() {
 }
 
 // ============================================================
-// INPUT
+// [[INPUT]] INPUT
 // ============================================================
 // ============================================================
-// EMOTE WHEEL (hold Q, flick a direction, release)
+// [[EMOTES]] EMOTE WHEEL (hold Q, flick a direction, release)
 // ============================================================
 const EMOTES = ['HELP', 'RUN', 'THIS WAY', "IT'S ON ME", 'HERE', 'HIDE'];
 const emote = {
@@ -2370,7 +3031,199 @@ function showEmoteBubble(ownerId, text, colorHex, x, z) {
   speakEmote(text, x, z, ownerId === myId, ownerId);
 }
 // ============================================================
-// GLOWSTICKS (press G to drop a glowing marker everyone sees)
+// [[BUG-LOGGER]] BUG REPORT LOGGER (F8 to export a snapshot + recent trace)
+// ============================================================
+const bugTrace = [];
+const BUG_TRACE_MAX = 240;
+let _bugSampleT = 0;
+function bugSample(dt) {
+  if (!running) return;
+  _bugSampleT += dt;
+  if (_bugSampleT < 0.1) return;
+  _bugSampleT = 0;
+  const ents = entities.map((e, i) => ({
+    i, x: +e.pos.x.toFixed(2), z: +e.pos.z.toFixed(2),
+    cell: e.cell.x + ',' + e.cell.y,
+    tgt: e.targetCell.x + ',' + e.targetCell.y,
+    state: e.state,
+    ftgt: e._fieldTarget ? (e._fieldTarget.x + ',' + e._fieldTarget.y) : '-'
+  }));
+  bugTrace.push({
+    t: +(performance.now() / 1000).toFixed(1),
+    lvl: level,
+    pcell: Math.floor(pos.x/CHUNK) + ',' + Math.floor(pos.z/CHUNK),
+    flash: flashlightOn ? 1 : 0, crouch: crouching ? 1 : 0, hiding: hiding ? 1 : 0,
+    kc: keycardsHave + '/' + keycardsNeeded,
+    ents
+  });
+  if (bugTrace.length > BUG_TRACE_MAX) bugTrace.shift();
+}
+
+function exportBugReport() {
+  const cfg = customConfig.active ? customConfig : { active: false };
+  const report = {
+    when: new Date().toISOString(),
+    note: 'THE CLEAN ROOMS bug report',
+    level, worldSeed, netMode, isHost, gridW, gridH,
+    spawnCell, exitCell,
+    keycards: keycardsHave + '/' + keycardsNeeded,
+    customConfig: cfg,
+    entityCount: entities.length,
+    recentTrace: bugTrace,
+  };
+  let text;
+  try { text = JSON.stringify(report, null, 2); }
+  catch (e) { text = 'could not serialize report: ' + e.message; }
+  try {
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'cleanrooms-bug-' + Date.now() + '.txt';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    flashBugSaved();
+  } catch (e) {
+    try { navigator.clipboard.writeText(text); flashBugSaved('COPIED TO CLIPBOARD'); } catch (e2) {}
+  }
+}
+
+function flashBugSaved(msg) {
+  let n = document.getElementById('bug-saved');
+  if (!n) {
+    n = document.createElement('div');
+    n.id = 'bug-saved';
+    n.style.cssText = 'position:fixed; bottom:40px; left:50%; transform:translateX(-50%); z-index:40; background:#16a35a; color:#fff; font-family:monospace; font-size:13px; letter-spacing:1px; padding:8px 16px; border-radius:4px; pointer-events:none;';
+    document.body.appendChild(n);
+  }
+  n.textContent = msg || 'BUG REPORT SAVED \u2193';
+  n.style.display = 'block';
+  clearTimeout(n._t);
+  n._t = setTimeout(() => { n.style.display = 'none'; }, 1800);
+}
+// ============================================================
+// [[KEYCARDS]] KEYCARDS (collect all to unlock the exit)
+// ============================================================
+const keycards = {};
+let keycardsNeeded = 0;
+let keycardsHave = 0;
+
+function keycardCountForLevel(lv) {
+  if (customConfig.active) return Math.max(0, Math.min(6, customConfig.keycards));
+  return Math.min(3, lv);
+}
+
+function spawnKeycards() {
+  for (const k in keycards) removeKeycardMesh(k);
+  for (const k in keycards) delete keycards[k];
+  keycardsHave = 0;
+  keycardsNeeded = keycardCountForLevel(level);
+
+  const taken = {};
+  taken[spawnCell.x + ',' + spawnCell.y] = 1;
+  taken[exitCell.x + ',' + exitCell.y] = 1;
+  let placed = 0, attempts = 0;
+  while (placed < keycardsNeeded && attempts < 400) {
+    attempts++;
+    const gx = (lrand() * gridW) | 0, gy = (lrand() * gridH) | 0;
+    const key = gx + ',' + gy;
+    if (taken[key]) continue;
+    taken[key] = 1;
+    const wx = gx * CHUNK + CHUNK / 2, wz = gy * CHUNK + CHUNK / 2;
+    spawnKeycardMesh('kc' + placed, wx, wz);
+    placed++;
+  }
+  // re-fetch already-collected cards in multiplayer
+  if (netMode !== 'single' && db) {
+    get(ref(db, 'rooms/' + ROOM_ID + '/keycards/' + level)).then(snap => {
+      const got = snap.val() || {};
+      for (const id in got) { if (keycards[id] && !keycards[id].taken) { keycards[id].taken = true; removeKeycardMesh(id); keycardsHave++; } }
+      updateHUD();
+    }).catch(()=>{});
+  }
+  updateHUD();
+}
+
+function spawnKeycardMesh(id, x, z) {
+  const g = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color: 0x36c0ff, emissive: 0x36c0ff, emissiveIntensity: 1.2, roughness: 0.4, metalness: 0.3 });
+  const card = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.5, 0.03), mat);
+  card.position.y = 1.0; g.add(card);
+  const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.1, 0.035),
+    new THREE.MeshStandardMaterial({ color: 0x0a3a55, emissive: 0x0a3a55, emissiveIntensity: 0.4 }));
+  stripe.position.set(0, 1.12, 0); g.add(stripe);
+  const light = new THREE.PointLight(0x36c0ff, 1.0, 5, 2);
+  light.position.set(0, 1.1, 0); g.add(light);
+  g.position.set(x, 0, z);
+  if (cellMeshGroup) cellMeshGroup.add(g);
+  keycards[id] = { group: g, card, light, x, z, taken: false };
+}
+
+function removeKeycardMesh(id) {
+  const k = keycards[id];
+  if (!k) return;
+  if (k.group.parent) k.group.parent.remove(k.group);
+  k.group.traverse(o => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); });
+}
+
+function updateKeycards(dt) {
+  for (const id in keycards) {
+    const k = keycards[id];
+    if (k.taken) continue;
+    k.group.rotation.y += dt * 1.5;
+    k.card.position.y = 1.0 + Math.sin(performance.now() * 0.003) * 0.08;
+    if (!iAmCaught && !isDowned) {
+      const d = Math.hypot(k.x - pos.x, k.z - pos.z);
+      if (d < 0.8) collectKeycard(id);
+    }
+  }
+}
+
+function collectKeycard(id) {
+  const k = keycards[id];
+  if (!k || k.taken) return;
+  k.taken = true;
+  removeKeycardMesh(id);
+  keycardsHave++;
+  updateHUD();
+  playKeycardChime();
+  if (netMode !== 'single' && db) {
+    set(ref(db, 'rooms/' + ROOM_ID + '/keycards/' + level + '/' + id), 1).catch(()=>{});
+  }
+}
+
+function exitUnlocked() { return keycardsHave >= keycardsNeeded; }
+
+let _exitHintT = 0;
+function showExitLockedHint() {
+  const now = performance.now();
+  if (now - _exitHintT < 2500) return;   // throttle
+  _exitHintT = now;
+  let p = document.getElementById('hide-prompt');
+  if (p) { p.textContent = 'EXIT LOCKED — FIND ' + (keycardsNeeded - keycardsHave) + ' MORE KEYCARD' + ((keycardsNeeded-keycardsHave)===1?'':'S'); p.style.display = 'block';
+    setTimeout(() => { if (p && p.textContent.startsWith('EXIT LOCKED')) p.style.display = 'none'; }, 2200); }
+}
+
+function playKeycardChime() {
+  if (!audio) return;
+  try {
+    const { ctx, master } = audio;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sine'; o.frequency.value = 880;
+    o.connect(g); g.connect(master);
+    g.gain.setValueAtTime(0.0001, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.18, ctx.currentTime + 0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.4);
+    o.frequency.exponentialRampToValueAtTime(1320, ctx.currentTime + 0.3);
+    o.start(); o.stop(ctx.currentTime + 0.42);
+  } catch (e) {}
+}
+
+function clearAllKeycards() {
+  for (const k in keycards) removeKeycardMesh(k);
+  for (const k in keycards) delete keycards[k];
+}
+// ============================================================
+// [[GLOWSTICKS]] GLOWSTICKS (press G to drop a glowing marker everyone sees)
 // ============================================================
 const glowsticks = {};   // key -> { mesh, light, x, z, color, born, ttl, key }
 let glowDropTimer = 0;
@@ -2489,7 +3342,7 @@ function updateEmoteBubbles() {
 }
 
 // ============================================================
-// CROUCH + HIDE (duck with C/L3; hide inside lockers)
+// [[CROUCH-HIDE]] CROUCH + HIDE (duck with C/L3; hide inside lockers)
 // ============================================================
 const CROUCH_EYE = 0.85;     // eye height while crouched
 function toggleCrouch() {
@@ -2565,6 +3418,7 @@ function initInput() {
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
     keys[e.code] = true;
     if (e.code === 'KeyF') { flashlightOn = !flashlightOn; flashlight.intensity = flashlightOn ? 3.0 : 0; }
+    if (e.code === 'F8') { e.preventDefault(); exportBugReport(); }
     if (e.code === 'KeyQ' && !e.repeat) openEmoteWheel();
     if (e.code === 'KeyG' && !e.repeat) dropGlowstick();
     if (e.code === 'KeyC' && !e.repeat) toggleCrouch();
@@ -2712,7 +3566,7 @@ function initTouch() {
 }
 
 // ============================================================
-// GAME FLOW
+// [[GAME-FLOW]] GAME FLOW
 // ============================================================
 // ---- Main-menu navigation -------------------------------------------------
 // pendingMode holds 'host' or 'join' while the player passes through the
@@ -3122,7 +3976,24 @@ function startNetSync() {
       }
     }
   });
+
+  // keycards: a teammate collecting one removes it for everyone on that level
+  kcRef = ref(db, 'rooms/' + ROOM_ID + '/keycards');
+  if (kcUnsub) kcUnsub();
+  kcUnsub = onValue(kcRef, snap => {
+    const all = snap.val() || {};
+    const mine = all[level] || {};
+    let count = 0;
+    for (const id in mine) {
+      count++;
+      if (keycards[id] && !keycards[id].taken) { keycards[id].taken = true; removeKeycardMesh(id); }
+    }
+    if (count > keycardsHave) keycardsHave = count;
+    updateHUD();
+  });
 }
+
+let kcRef = null, kcUnsub = null;
 
 let entityRef = null, entityUnsub = null, entityNet = null;
 let glowRef = null, glowUnsub = null;
@@ -3167,6 +4038,7 @@ function stopNetSync() {
   if (othersUnsub) { othersUnsub(); othersUnsub = null; }
   if (entityUnsub) { entityUnsub(); entityUnsub = null; }
   if (glowUnsub) { glowUnsub(); glowUnsub = null; }
+  if (kcUnsub) { kcUnsub(); kcUnsub = null; }
   clearAllGlowsticks();
   try { if (selfRef) remove(selfRef); } catch (e) {}
   try { if (isHost && entityRef) remove(entityRef); } catch (e) {}
@@ -3314,6 +4186,8 @@ function launchCustom() {
   customConfig.monsters = Math.max(1, Math.min(6, Math.round(num('cfg-monsters', 1))));
   customConfig.entitySpeed = num('cfg-speed', 1);
   customConfig.fog = num('cfg-fog', 1);
+  customConfig.keycards = Math.max(0, Math.min(6, Math.round(num('cfg-keycards', 1))));
+  customConfig.biome = document.getElementById('cfg-biome').value;
   const seedStr = document.getElementById('cfg-seed').value.trim();
   if (seedStr && /^\d+$/.test(seedStr)) { worldSeed = (parseInt(seedStr, 10) >>> 0) || 1; }
   else { worldSeed = (Math.random() * 0x7fffffff) | 0; }
@@ -3338,6 +4212,7 @@ function beginLevel() {
   }
   if (wantEntity) spawnEntity();
   else removeEntity();
+  spawnKeycards();
   // re-fetch any glowsticks already placed on this level by teammates
   if (netMode !== 'single' && db && glowRef) {
     get(glowRef).then(snap => {
@@ -3471,7 +4346,7 @@ function flashScreen() {
 }
 
 // ============================================================
-// HUD + MINIMAP
+// [[HUD-MINIMAP]] HUD + MINIMAP
 // ============================================================
 function updateHUD() {
   document.getElementById('level').textContent = 'LEVEL ' + level;
@@ -3486,7 +4361,17 @@ function updateHUD() {
     else if (z === 'red') { zoneTxt = '— RED ZONE · THE DEPTHS —'; col = '#e05a4a'; }
   }
   const zEl = document.getElementById('zone');
-  zEl.textContent = zoneTxt; zEl.style.color = col;
+  zEl.textContent = (currentBiome ? currentBiome.name + '  ·  ' : '') + zoneTxt; zEl.style.color = col;
+
+  // keycard counter
+  const kcEl = document.getElementById('keycard-hud');
+  if (kcEl) {
+    if (keycardsNeeded > 0) {
+      const done = keycardsHave >= keycardsNeeded;
+      kcEl.textContent = '⬡ KEYCARDS ' + keycardsHave + '/' + keycardsNeeded + (done ? ' · EXIT OPEN' : '');
+      kcEl.style.color = done ? '#5ec07a' : '#36c0ff';
+    } else { kcEl.textContent = ''; }
+  }
 }
 
 function drawMinimap() {
@@ -3570,6 +4455,20 @@ function drawMinimap() {
     mmCtx.fillRect(gx * cell + cell*0.4, gz * cell + cell*0.4, cell*0.2, cell*0.2);
   }
 
+  // keycards on the minimap (blue diamonds) — only those not yet taken AND only
+  // in cells you've already explored (respects fog of war)
+  for (const id in keycards) {
+    const k = keycards[id];
+    if (k.taken) continue;
+    const gx = Math.floor(k.x / CHUNK), gz = Math.floor(k.z / CHUNK);
+    if (!visited.has(gx + ',' + gz)) continue;   // hidden until explored
+    const kx = gx * cell + cell/2, ky = gz * cell + cell/2;
+    mmCtx.fillStyle = '#36c0ff';
+    mmCtx.save(); mmCtx.translate(kx, ky); mmCtx.rotate(Math.PI/4);
+    mmCtx.fillRect(-cell*0.16, -cell*0.16, cell*0.32, cell*0.32);
+    mmCtx.restore();
+  }
+
   // player marker + facing tick
   const px = Math.floor(pos.x / CHUNK), pz = Math.floor(pos.z / CHUNK);
   const pcx = px * cell + cell / 2, pcy = pz * cell + cell / 2;
@@ -3585,7 +4484,7 @@ function drawMinimap() {
 }
 
 // ============================================================
-// MAIN LOOP
+// [[MAIN-LOOP]] MAIN LOOP
 // ============================================================
 function tick() {
   requestAnimationFrame(tick);
@@ -3606,6 +4505,8 @@ function tick() {
   updateEmoteBubbles();
   if (glowDropTimer > 0) glowDropTimer -= dt;
   updateGlowsticks(dt);
+  updateKeycards(dt);
+  bugSample(dt);
   updateHidePrompt();
   // animate locker doors. The door is modeled CLOSED at rotation 0 (louvers flat
   // across the front). So: swing OPEN (~ -1.45rad) normally so you can step in,
@@ -3735,11 +4636,20 @@ function update(dt) {
   // --- gateway portal shimmer + check ---
   if (gateway) {
     const doorMat = gateway.children[3].material;
-    doorMat.emissiveIntensity = 0.4 + Math.sin(performance.now() * 0.004) * 0.25;
+    const unlocked = exitUnlocked();
+    // green pulse when unlocked, dim red when still locked
+    if (unlocked) {
+      doorMat.emissive.setHex(0x1f7a3a);
+      doorMat.emissiveIntensity = 0.4 + Math.sin(performance.now() * 0.004) * 0.25;
+    } else {
+      doorMat.emissive.setHex(0x7a1f1f);
+      doorMat.emissiveIntensity = 0.3 + Math.sin(performance.now() * 0.006) * 0.15;
+    }
     const dx = pos.x - gateway.userData.cx;
     const dz = pos.z - gateway.userData.cz;
     if (dx*dx + dz*dz < (CHUNK*0.45)*(CHUNK*0.45)) {
-      nextLevel(); return;
+      if (unlocked) { nextLevel(); return; }
+      else showExitLockedHint();
     }
   }
 
@@ -3771,7 +4681,7 @@ function update(dt) {
 }
 
 // ============================================================
-// BOOT
+// [[BOOT]] BOOT
 // ============================================================
 initThree();
 // prime the speech-synth voice list (loads async in some browsers)
