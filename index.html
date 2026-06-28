@@ -332,10 +332,10 @@
       <div class="corp-doc-label">SITE FILE — CLEANROOM COMPLEX 7 ▸ ACCESS RESTRICTED</div>
       <h1>THE CLEAN ROOMS</h1>
       <p>Verumo Manufacturing Site 7 produced sterile medical components until the lower-level
-      complex was sealed and the plant decommissioned. The production halls are dark
+      complex was sealed and the plant decommissioned. The vaulted production halls are dark
       now — frost has taken the cold-storage wings, growth has reclaimed others. Descend through
       each level to the <b style="color:#16a35a">emergency exit</b>, following the colored floor
-      lines (blue near the surface, red near the exit) and collecting the <b style="color:#36c0ff">keycards</b>
+      lines (blue near the surface, red in the depths) and collecting the <b style="color:#36c0ff">keycards</b>
       needed to unlock it. Things the cleanup contractors <b style="color:#d8554a">never finished
       removing</b> are still active down here — and something far larger still circles overhead.
       Kill your flashlight, stay low, and keep out of their path.</p>
@@ -615,8 +615,12 @@ let running = false, paused = true, transitioning = false;
 
 let yaw = 0, pitch = 0;
 let velY = 0, onGround = true;
+let exposure = 0;             // builds while up on walls / out of bounds; triggers a swoop
+let exposureSwooping = false; // the flyer is committing to a kill dive
 let pos = new THREE.Vector3();
 let crouching = false;        // toggle: ducked (lower view, slower)
+let eDownTime = 0, eMovedWhileHeld = false;   // E: tap=hide, hold+move=push
+let grabbedStack = null, grabOffX = 0, grabOffZ = 0;   // stack currently being dragged
 let hiding = false;          // tucked inside a locker (fully hidden if flashlight off)
 let hideSpot = null;         // the obstacle we're hidden in
 let savedPos = null;         // position to return to when leaving a hide spot
@@ -1887,6 +1891,7 @@ function buildLevel() {
   teardownFlooded();
   teardownShadowFlyer();
   teardownAmbientBugs();
+  teardownGroundLizards();
   cellMeshGroup = new THREE.Group();
   scene.add(cellMeshGroup);
 
@@ -2057,6 +2062,7 @@ function buildLevel() {
   scatterOvergrowth(maze);   // overgrowth biome: add vines/ferns/fungus
   scatterCryo(maze);         // cold biome: add icicles/frost/ice sheets
   setupAmbientBugs();        // ambient flying bugs (atmosphere)
+  setupGroundLizards();      // overgrowth: tiny lizards scuttling on the floor
 
   // ---- Emergency exit at the deepest dead-end ----
   buildGateway(maze);
@@ -2268,7 +2274,12 @@ function placeFurniture(maze) {
         const n = 2 + ((lrand() * 3) | 0);   // 2-4 stacks
         for (let k = 0; k < n; k++) {
           const [ox, oz] = spots[k];
-          const count = 1 + ((lrand() * 3) | 0);   // 1-3 high
+          // most stacks are short (1-3 high); occasionally a TALL stack whose top
+          // is within a single jump (~0.93) of the wall top, so you can climb it
+          // and hop onto the wall.
+          let count;
+          if (lrand() < 0.22) count = 6;            // tall: locker height ~2.0
+          else count = 1 + ((lrand() * 3) | 0);     // short: 1-3 high
           const b = buildBinStack(count);
           const rot = ((lrand() * 4) | 0) * Math.PI / 2;
           b.group.position.set(cx + ox, 0, cz + oz);
@@ -2280,6 +2291,7 @@ function placeFurniture(maze) {
             type: b.jumpable ? 'jump' : 'block',
             minX: cx + ox - hx, maxX: cx + ox + hx,
             minZ: cz + oz - hz, maxZ: cz + oz + hz, top: b.top,
+            pushable: true, group: b.group, hx, hz,   // movable stack
           });
         }
         continue;   // this cell is a storage room; no other furniture here
@@ -2452,9 +2464,179 @@ function updateAmbientBugs(dt) {
 }
 
 // ============================================================
-// SHADOW FLYER — a rare dark shape that crosses high overhead. Pure scare:
-// no collision, no catch, just an ominous silhouette + screen shake + sound.
+// GROUND LIZARDS — tiny creatures that scuttle around the floor (overgrowth only)
 // ============================================================
+let groundLizards = null;
+function setupGroundLizards() {
+  teardownGroundLizards();
+  if (currentBiomeKey !== 'overgrowth') return;
+  const count = 9;
+  const group = new THREE.Group();
+  const liz = [];
+  const bodyMat = new THREE.MeshStandardMaterial({ color: 0x3b5a32, roughness: 0.85, flatShading: true });
+  for (let i = 0; i < count; i++) {
+    const m = new THREE.Group();
+    // little body + tail
+    const body = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.06, 0.26), bodyMat);
+    m.add(body);
+    // tail tapers backward (cone tip pointing away from the body, toward +Z rear)
+    const tail = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.22, 4), bodyMat);
+    tail.rotation.x = Math.PI/2; tail.position.set(0, 0, 0.24); m.add(tail);
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.05, 0.08), bodyMat);
+    head.position.set(0, 0.005, -0.16); m.add(head);
+    // four little legs splayed out from the body
+    const legGeo = new THREE.BoxGeometry(0.025, 0.04, 0.025);
+    const legPos = [[-0.075,-0.07],[0.075,-0.07],[-0.075,0.07],[0.075,0.07]];
+    const legs = [];
+    for (const [lxo, lzo] of legPos) {
+      const leg = new THREE.Mesh(legGeo, bodyMat);
+      leg.position.set(lxo, -0.04, lzo);
+      m.add(leg);
+      legs.push(leg);
+    }
+    const lx = pos.x + (Math.random()-0.5)*12, lz = pos.z + (Math.random()-0.5)*12;
+    m.position.set(lx, 0.05, lz);
+    group.add(m);
+    liz.push({
+      mesh: m, legs, x: lx, z: lz, dir: Math.random()*Math.PI*2,
+      speed: 0, state: 'pause', timer: Math.random()*1.5, phase: Math.random()*Math.PI*2,
+    });
+  }
+  scene.add(group);
+  groundLizards = { group, liz };
+}
+function teardownGroundLizards() {
+  if (groundLizards) {
+    scene.remove(groundLizards.group);
+    groundLizards.group.traverse(o => { if (o.geometry) o.geometry.dispose(); });
+    groundLizards = null;
+  }
+}
+function updateGroundLizards(dt) {
+  if (!groundLizards) return;
+  const range = 9;
+  for (const L of groundLizards.liz) {
+    L.timer -= dt;
+    if (L.timer <= 0) {
+      // alternate between darting and pausing (scurry-and-freeze behavior)
+      if (L.state === 'pause') {
+        L.state = 'dart'; L.speed = 1.6 + Math.random()*1.8;
+        L.dir = Math.random()*Math.PI*2; L.timer = 0.25 + Math.random()*0.6;
+      } else {
+        L.state = 'pause'; L.speed = 0; L.timer = 0.4 + Math.random()*2.2;
+      }
+    }
+    if (L.speed > 0) {
+      L.x += Math.sin(L.dir) * L.speed * dt;
+      L.z += Math.cos(L.dir) * L.speed * dt;
+      // head (-Z) leads, so face the movement direction + PI
+      L.dir2 = L.dir + Math.PI;
+      // ---- scuttle animation: cycle legs + wiggle the body side to side ----
+      L.phase += dt * 22;   // leg cycle speed
+      if (L.legs) {
+        for (let li = 0; li < L.legs.length; li++) {
+          // diagonally opposite legs swing together (alternating tripod-ish gait)
+          const offset = (li === 0 || li === 3) ? 0 : Math.PI;
+          L.legs[li].rotation.x = Math.sin(L.phase + offset) * 0.6;
+        }
+      }
+      // body wiggle: small yaw waggle layered on the facing direction
+      const wiggle = Math.sin(L.phase * 0.5) * 0.18;
+      L.mesh.rotation.y = L.dir2 + wiggle;
+      // quick low bob
+      L.mesh.position.y = 0.05 + Math.abs(Math.sin(L.phase)) * 0.015;
+    } else {
+      // at rest: face last direction, legs settle, sit on the ground
+      if (L.dir2 != null) L.mesh.rotation.y = L.dir2;
+      if (L.legs) for (const lg of L.legs) lg.rotation.x = 0;
+      L.mesh.position.y = 0.05;
+    }
+    // wrap near the player so they're always around
+    if (L.x < pos.x - range) L.x += range*2;
+    if (L.x > pos.x + range) L.x -= range*2;
+    if (L.z < pos.z - range) L.z += range*2;
+    if (L.z > pos.z + range) L.z -= range*2;
+    L.mesh.position.x = L.x; L.mesh.position.z = L.z;
+  }
+}
+
+// ============================================================
+// EXPOSURE — punishes camping up on walls or leaving the map bounds. The shadow
+// flyer swoops and kills you if you stay exposed too long. Out of bounds is worse.
+// ============================================================
+function updateExposure(dt) {
+  if (!running || iAmCaught) { exposure = 0; exposureSwooping = false; showHidePrompt(''); return; }
+
+  const feet = pos.y - EYE_H;
+  // out of bounds: outside the maze rectangle (with a small margin)
+  const margin = 0.5;
+  const outOfBounds = pos.x < margin || pos.x > gridW*CHUNK - margin ||
+                      pos.z < margin || pos.z > gridH*CHUNK - margin;
+  // on a wall / elevated above the normal floor (climbed up high)
+  const upHigh = feet > WALL_H - 0.8;
+
+  if (outOfBounds) {
+    // much harsher: builds fast, no real grace
+    exposure += dt * 0.9;
+  } else if (upHigh) {
+    // up on the walls: a generous ~6-second warning window, then it comes for you
+    exposure += dt * 0.16;
+  } else {
+    // back on the level floor and in bounds: safe, exposure bleeds off
+    exposure = Math.max(0, exposure - dt * 1.5);
+    exposureSwooping = false;
+  }
+
+  // warning cue + on-screen text while exposure builds
+  if ((outOfBounds || upHigh) && exposure > 0.1) {
+    const pct = Math.min(1, exposure);
+    if (outOfBounds) {
+      showExposureWarning('⚠ OUT OF BOUNDS — RETURN TO THE FACILITY', pct);
+    } else {
+      showExposureWarning('⚠ EXPOSED — GET DOWN', pct);
+    }
+    // subtle screen shake as it builds, growing toward the swoop
+    shakeAmount = Math.max(shakeAmount, pct * 0.04);
+  } else {
+    showExposureWarning('', 0);
+  }
+
+  // exposure maxed -> the flyer commits to a kill dive
+  if (exposure >= 1 && !exposureSwooping) {
+    exposureSwooping = true;
+    triggerExposureSwoop();
+  }
+}
+
+function showExposureWarning(text, pct) {
+  let p = document.getElementById('exposure-warning');
+  if (!p) {
+    p = document.createElement('div');
+    p.id = 'exposure-warning';
+    p.style.cssText = 'position:fixed; top:18%; left:50%; transform:translateX(-50%); z-index:13; color:#ff5a4a; font-family:monospace; font-size:16px; letter-spacing:2px; text-shadow:0 0 8px #000; pointer-events:none; padding:6px 14px; border:1px solid rgba(255,80,60,0.6); background:rgba(20,0,0,0.5); text-align:center;';
+    document.body.appendChild(p);
+  }
+  p.textContent = text;
+  p.style.display = text ? 'block' : 'none';
+  if (text) p.style.opacity = (0.5 + pct * 0.5).toFixed(2);
+}
+
+// the shadow flyer dives at the player's position and catches them
+function triggerExposureSwoop() {
+  if (!shadowFlyer) { shadowFlyer = buildShadowShape(); scene.add(shadowFlyer); }
+  const yStart = (isAtrium ? ceilingH : WALL_H) + 5;
+  shadowFlyer.userData.swoop = {
+    t: 0, dur: 1.6,
+    fromX: pos.x + (Math.random()-0.5)*6, fromZ: pos.z + (Math.random()-0.5)*6, fromY: yStart,
+    // aim where the player is now; updated as it dives
+  };
+  shadowFlyer.visible = true;
+  shadowFlyer.userData.baseScale = 1.0;
+  shadowFlyer.scale.set(1,1,1);
+  playShadowSound();
+  playNullScreech(pos.x, pos.z);   // reuse the guttural impact for the dive
+}
+
 function buildShadowShape() {
   // a jagged, winged dark silhouette — semi-transparent black, unlit, so it reads
   // as a hazy shadow/absence passing over rather than a hard solid object.
@@ -2547,6 +2729,35 @@ function playShadowSound() {
 }
 
 function updateShadowFlyer(dt) {
+  // a kill-swoop (from exposure) takes priority over normal flyovers
+  if (shadowFlyer && shadowFlyer.userData.swoop) {
+    const s = shadowFlyer.userData.swoop;
+    s.t += dt / s.dur;
+    if (s.t >= 1) {
+      // dive complete: if the player is still exposed, it catches them
+      shadowFlyer.userData.swoop = null;
+      shadowFlyer.visible = false;
+      const feet = pos.y - EYE_H;
+      const stillExposed = feet > WALL_H - 0.8 ||
+        pos.x < 0.5 || pos.x > gridW*CHUNK - 0.5 || pos.z < 0.5 || pos.z > gridH*CHUNK - 0.5;
+      if (stillExposed && running && !iAmCaught) caughtByEntity();
+      else { exposure = 0; exposureSwooping = false; }
+      return;
+    }
+    // dive from the start point down toward the player, tracking them
+    const ease = s.t * s.t;   // accelerate into the dive
+    const tx = pos.x, tz = pos.z, ty = pos.y + 0.5;
+    shadowFlyer.position.set(
+      s.fromX + (tx - s.fromX) * ease,
+      s.fromY + (ty - s.fromY) * ease,
+      s.fromZ + (tz - s.fromZ) * ease
+    );
+    shadowFlyer.rotation.y = Math.atan2(tx - shadowFlyer.position.x, tz - shadowFlyer.position.z);
+    const wings = shadowFlyer.userData.wings;
+    if (wings) { const flap = Math.sin(s.t * Math.PI * 16) * 0.7; for (const w of wings) w.rotation.z = w.userData.sgn * flap; }
+    shakeAmount = Math.max(shakeAmount, 0.05 + ease * 0.1);
+    return;
+  }
   // tick down the timer; rarely trigger a flyover
   if (!shadowFlyer || !shadowFlyer.visible) {
     shadowFlyerTimer -= dt;
@@ -3742,17 +3953,58 @@ function hideCaughtNotice() {
 }
 
 
+// While a stack is grabbed (hold E), the player is locked to it and can move it in
+// any direction — push, pull, or strafe. Both move together if the destination is
+// clear; if the stack would hit a wall/obstacle/boundary, neither moves.
+const DRAG_SPEED = 1.9;
+function dragGrabbedStack(mx, mz, dt, speed) {
+  const o = grabbedStack;
+  const move = Math.min(speed, DRAG_SPEED) * dt;
+  const dx = mx * move, dz = mz * move;
+  if (!dx && !dz) return;
+
+  // where the stack would end up
+  const nMinX = o.minX + dx, nMaxX = o.maxX + dx;
+  const nMinZ = o.minZ + dz, nMaxZ = o.maxZ + dz;
+
+  // boundary + wall + other-obstacle clearance for the stack's destination
+  if (nMinX < 0.3 || nMaxX > gridW*CHUNK - 0.3 || nMinZ < 0.3 || nMaxZ > gridH*CHUNK - 0.3) return;
+  for (const w of walls) {
+    if (nMaxX > w.minX && nMinX < w.maxX && nMaxZ > w.minZ && nMinZ < w.maxZ) return;
+  }
+  for (const ob of obstacles) {
+    if (ob === o) continue;
+    if (nMaxX > ob.minX && nMinX < ob.maxX && nMaxZ > ob.minZ && nMinZ < ob.maxZ) return;
+  }
+
+  // also keep the player's own destination clear of walls (so you don't drag into one)
+  const npx = pos.x + dx, npz = pos.z + dz;
+  for (const w of walls) {
+    if (npx + PLAYER_R > w.minX && npx - PLAYER_R < w.maxX &&
+        npz + PLAYER_R > w.minZ && npz - PLAYER_R < w.maxZ) return;
+  }
+
+  // move stack collider + mesh, and the player along with it (locked offset)
+  o.minX = nMinX; o.maxX = nMaxX; o.minZ = nMinZ; o.maxZ = nMaxZ;
+  if (o.group) { o.group.position.x += dx; o.group.position.z += dz; }
+  pos.x += dx; pos.z += dz;
+}
+
 function collideAxis(nx, nz, useX) {
   // returns adjusted coordinate for the moving axis
   const px = useX ? nx : pos.x;
   const pz = useX ? pos.z : nz;
   const testX = px, testZ = pz;
+  const feetW = pos.y - EYE_H;
+  const WALL_STEP_TOL = 0.45;
   const all = walls;
   for (let i = 0; i < all.length; i++) {
     const b = all[i];
     if (testX + PLAYER_R > b.minX && testX - PLAYER_R < b.maxX &&
         testZ + PLAYER_R > b.minZ && testZ - PLAYER_R < b.maxZ) {
-      return false; // walls block at any height
+      // walls now have a walkable top: block only while feet are below the top.
+      // Once you're up on the wall (from a bin stack), you can walk along it.
+      if (feetW < WALL_H - WALL_STEP_TOL) return false;
     }
   }
   // Obstacles block horizontally ONLY while the player's feet are clearly below
@@ -4447,8 +4699,24 @@ function showHidePrompt(text) {
 function updateHidePrompt() {
   if (!running || iAmCaught) { showHidePrompt(''); return; }
   if (hiding) { showHidePrompt('E — leave hiding spot   ·   F — light off to vanish'); return; }
+  if (grabbedStack) { showHidePrompt('Hold E + move to drag   ·   release to drop'); return; }
   const spot = nearbyHideSpot();
-  showHidePrompt(spot ? 'E — hide in locker' : '');
+  if (spot) { showHidePrompt('E — hide in locker'); return; }
+  if (nearbyPushable()) { showHidePrompt('Hold E to drag'); return; }
+  showHidePrompt('');
+}
+
+// nearest pushable stack within grab range of the player (any direction)
+function nearbyPushable() {
+  const reach = PLAYER_R + 0.55;
+  for (const o of obstacles) {
+    if (!o.pushable) continue;
+    // distance from player to the stack's AABB
+    const cx = Math.max(o.minX, Math.min(pos.x, o.maxX));
+    const cz = Math.max(o.minZ, Math.min(pos.z, o.maxZ));
+    if ((cx - pos.x)**2 + (cz - pos.z)**2 < reach*reach) return o;
+  }
+  return null;
 }
 
 function initInput() {
@@ -4462,7 +4730,7 @@ function initInput() {
     if (e.code === 'KeyQ' && !e.repeat) openEmoteWheel();
     if (e.code === 'KeyG' && !e.repeat) dropGlowstick();
     if (e.code === 'KeyC' && !e.repeat) toggleCrouch();
-    if (e.code === 'KeyE' && !e.repeat) toggleHide();
+    if (e.code === 'KeyE' && !e.repeat) { eDownTime = performance.now(); eMovedWhileHeld = false; }
     if (e.code === 'Escape') {
       // resume if already paused; otherwise the pointerlock loss will open pause
       if (running && paused && !document.getElementById('pause').classList.contains('hidden')) {
@@ -4475,6 +4743,11 @@ function initInput() {
     if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
     keys[e.code] = false;
     if (e.code === 'KeyQ') closeEmoteWheel(true);   // release Q -> fire highlighted emote
+    if (e.code === 'KeyE') {
+      // quick tap that wasn't used to push a stack -> hide/leave locker
+      const held = performance.now() - (eDownTime || 0);
+      if (held < 350 && !eMovedWhileHeld) toggleHide();
+    }
   });
 
   // Mouse pointer-lock look — enabled on anything with a fine pointer (mouse or
@@ -5308,7 +5581,7 @@ function startLevelAt(n) {
   document.getElementById('minimap-wrap').classList.remove('hidden');
   level = n;
   iAmCaught = false; controlsFrozen = false; hideCaughtNotice();
-  crouching = false; hiding = false; hideSpot = null; crouchOffset = 0; showHidePrompt('');
+  crouching = false; hiding = false; hideSpot = null; crouchOffset = 0; grabbedStack = null; exposure = 0; exposureSwooping = false; showHidePrompt(''); showExposureWarning('', 0);
   beginLevel();
   running = true; paused = false; transitioning = false;
   setTouchUI(true);
@@ -5594,6 +5867,7 @@ function tick() {
   updateFloodedWater(dt);
   updateShadowFlyer(dt);
   updateAmbientBugs(dt);
+  updateGroundLizards(dt);
   bugSample(dt);
   updateHidePrompt();
   // animate locker doors. The door is modeled CLOSED at rotation 0 (louvers flat
@@ -5658,9 +5932,34 @@ function update(dt) {
   const stepX = mx * speed * dt;
   const stepZ = mz * speed * dt;
 
+  // ---- DRAG BIN STACKS: hold E next to a stack to grab it, then move to push/pull ----
+  let dragging = false;
+  const eHeld = keys['KeyE'] || touch.hide || pad.hide;
+  if (eHeld && !hiding) {
+    if (!grabbedStack) {
+      // try to grab the nearest stack
+      const g = nearbyPushable();
+      if (g) {
+        grabbedStack = g;
+        grabOffX = ((g.minX + g.maxX) / 2) - pos.x;
+        grabOffZ = ((g.minZ + g.maxZ) / 2) - pos.z;
+      }
+    }
+    if (grabbedStack && moving) {
+      eMovedWhileHeld = true;     // used for drag, not a hide-tap
+      dragGrabbedStack(mx, mz, dt, speed);
+      dragging = true;
+    }
+  } else {
+    grabbedStack = null;          // released E -> drop the stack
+  }
+  // when dragging, the drag function already moved the player; skip normal stepping
+  const stepXf = dragging ? 0 : stepX;
+  const stepZf = dragging ? 0 : stepZ;
+
   // axis-separated AABB resolution (slide along walls)
-  if (collideAxis(pos.x + stepX, pos.z, true)) pos.x += stepX;
-  if (collideAxis(pos.x, pos.z + stepZ, false)) pos.z += stepZ;
+  if (collideAxis(pos.x + stepXf, pos.z, true)) pos.x += stepXf;
+  if (collideAxis(pos.x, pos.z + stepZf, false)) pos.z += stepZf;
 
   // --- jumping / gravity ---
   if ((keys['Space'] || pad.jump) && onGround) { velY = JUMP_V; onGround = false; }
@@ -5679,12 +5978,22 @@ function update(dt) {
     // this matches the side-collision footprint so you don't fall-and-stick at edges
     if (fx + PLAYER_R > o.minX && fx - PLAYER_R < o.maxX &&
         fz + PLAYER_R > o.minZ && fz - PLAYER_R < o.maxZ) {
+      if (o.minY != null) continue;   // hanging obstacles (lamps) aren't standable
       if (feetNow >= o.top - 0.45) groundY = Math.max(groundY, o.top + EYE_H);
+    }
+  }
+  // wall tops are walkable: if you're up at wall height over a wall, it supports you
+  for (const b of walls) {
+    if (fx + PLAYER_R > b.minX && fx - PLAYER_R < b.maxX &&
+        fz + PLAYER_R > b.minZ && fz - PLAYER_R < b.maxZ) {
+      if (feetNow >= WALL_H - 0.45) groundY = Math.max(groundY, WALL_H + EYE_H);
     }
   }
   if (newY <= groundY) { newY = groundY; velY = 0; onGround = true; }
   else onGround = false;
   pos.y = newY;
+
+  updateExposure(dt);
 
   // --- view bob + footsteps ---
   let bob = 0;
