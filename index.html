@@ -231,6 +231,9 @@
   #btn-jump  { right: 30px;  bottom: 96px; width: 76px; height: 76px; }
   #btn-sprint{ right: 116px; bottom: 40px; width: 64px; height: 64px; }
   #btn-flash { right: 36px;  bottom: 188px; width: 60px; height: 60px; }
+  #btn-crouch{ left: 30px;  bottom: 200px; width: 64px; height: 64px; font-size: 11px; }
+  #btn-hide  { left: 104px; bottom: 200px; width: 64px; height: 64px; font-size: 12px; }
+  #btn-glow  { left: 30px;  bottom: 278px; width: 60px; height: 60px; font-size: 11px; }
   #btn-pause { top: 14px; right: 16px; bottom: auto; width: 50px; height: 50px; font-size: 14px; }
 
   /* rotate-to-landscape hint */
@@ -282,6 +285,9 @@
   <button id="btn-flash" class="tbtn">LIGHT</button>
   <button id="btn-jump" class="tbtn">JUMP</button>
   <button id="btn-sprint" class="tbtn">RUN</button>
+  <button id="btn-crouch" class="tbtn">CROUCH</button>
+  <button id="btn-hide" class="tbtn">HIDE</button>
+  <button id="btn-glow" class="tbtn">FLARE</button>
   <button id="btn-pause" class="tbtn">❚❚</button>
 </div>
 
@@ -326,12 +332,13 @@
       <div class="corp-doc-label">SITE FILE — CLEANROOM COMPLEX 7 ▸ ACCESS RESTRICTED</div>
       <h1>THE CLEAN ROOMS</h1>
       <p>Verumo Manufacturing Site 7 produced sterile medical components until the lower-level
-      cleanrooms were sealed and the plant was decommissioned. Sterilization wings are dark,
-      coolant has flooded the floors, and the automated systems are failing. Descend through each
-      level to the <b style="color:#16a35a">emergency exit</b>, following the colored floor lines —
-      blue near the surface, red in the sealed sub-levels. Something the cleanup contractors
-      <b style="color:#d8554a">never finished removing</b> is still active down there. Kill your
-      flashlight and stay out of its path.</p>
+      complex was sealed and the plant decommissioned. The production halls are dark
+      now — frost has taken the cold-storage wings, growth has reclaimed others. Descend through
+      each level to the <b style="color:#16a35a">emergency exit</b>, following the colored floor
+      lines (blue near the surface, red near the exit) and collecting the <b style="color:#36c0ff">keycards</b>
+      needed to unlock it. Things the cleanup contractors <b style="color:#d8554a">never finished
+      removing</b> are still active down here — and something far larger still circles overhead.
+      Kill your flashlight, stay low, and keep out of their path.</p>
 
       <div class="corp-controls-head">OPERATOR CONTROLS</div>
       <div class="controls-grid">
@@ -339,12 +346,13 @@
         <b>Mouse</b><span>Look</span>
         <b>Shift</b><span>Sprint</span>
         <b>Space</b><span>Jump</span>
-        <b>F</b><span>Flashlight</span>
-        <b>C</b><span>Crouch</span>
-        <b>E</b><span>Hide in locker</span>
-        <b>Q</b><span>Emote wheel</span>
-        <b>G</b><span>Glowstick</span>
-        <b>Xbox Pad</b><span>Supported</span>
+        <b>F</b><span>Flashlight (off = harder to detect)</span>
+        <b>C</b><span>Crouch (also dodges The Null)</span>
+        <b>E</b><span>Hide in / leave a locker</span>
+        <b>G</b><span>Drop glowstick</span>
+        <b>Q</b><span>Emote wheel (co-op)</span>
+        <b>Touch</b><span>On-screen controls on phones/tablets</span>
+        <b>Xbox Pad</b><span>Fully supported</span>
       </div>
     </div>
 
@@ -399,7 +407,6 @@
           <option value="random" selected>Random (from seed)</option>
           <option value="cleanroom">Cleanroom</option>
           <option value="cold">Cold Storage</option>
-          <option value="flooded">Flooded Sub-level</option>
           <option value="overgrowth">Overgrowth</option>
         </select></div>
     </div>
@@ -564,7 +571,13 @@ let roomRef = null;     // db ref to /rooms/main
 
 // ---------- Constants ----------
 const CHUNK = 3;            // physical units per maze cell
-const WALL_H = 3.2;         // wall height
+const WALL_H = 3.2;         // wall height (maze walls)
+let ceilingH = WALL_H;      // ceiling height for the current floor (tall on atrium floors)
+let isAtrium = false;       // true when this floor is a tall vaulted "atrium" type
+let levelLightPositions = [];   // fixture positions, for scatter to hang from lights
+let shakeAmount = 0;            // current screen-shake magnitude (decays)
+let shadowFlyer = null;        // the rare overhead shadow shape
+let shadowFlyerTimer = 25;     // seconds until the next possible flyover
 const WALL_T = 0.25;        // wall thickness (half-extent feel)
 const PLAYER_R = 0.32;      // player collision radius
 const EYE_H = 1.55;         // camera eye height
@@ -711,6 +724,7 @@ const customConfig = {
   keycards: 1,       // keycards required per floor
   biome: 'random',   // forced biome, or 'random' (seed-derived)
   monsterType: 'standard',  // 'standard', 'null', or 'both'
+  atrium: 'auto',    // 'auto' (seed), 'on', or 'off'
 };
 let entitySound = null;     // { panner, gain, osc... } spatial audio nodes
 
@@ -909,7 +923,8 @@ function scatterOvergrowth(maze) {
   const darkCell = {};
   for (const fl of flickerLights) {
     if (fl.dead) {
-      const dx = Math.floor(fl.mesh.position.x / CHUNK), dz = Math.floor(fl.mesh.position.z / CHUNK);
+      const dx = Math.floor((fl.wx != null ? fl.wx : fl.mesh.position.x) / CHUNK);
+      const dz = Math.floor((fl.wz != null ? fl.wz : fl.mesh.position.z) / CHUNK);
       darkCell[dx + ',' + dz] = 1;
     }
   }
@@ -982,11 +997,12 @@ function scatterOvergrowth(maze) {
         for (let k = 0; k < n; k++) {
           const vx = wx + dx * (CHUNK/2 - 0.25) + (lrand()-0.5)*0.7;
           const vz = wz + dz * (CHUNK/2 - 0.25) + (lrand()-0.5)*0.7;
-          const len = 0.7 + lrand()*1.7;
+          // drape much longer from the high ceiling on atrium floors
+          const len = isAtrium ? (2.0 + lrand()*5.0) : (0.7 + lrand()*1.7);
           // a vine is a column of small segments (instanced) hanging down
           const segs = Math.max(3, Math.floor(len / 0.22));
           for (let sgi = 0; sgi < segs; sgi++) {
-            const yy = WALL_H - (sgi + 0.5) * (len / segs);
+            const yy = ceilingH - (sgi + 0.5) * (len / segs);
             const wob = Math.sin(sgi * 0.6) * 0.06;
             pushT(vineT, vx + wob, yy, vz, 0, 1, 0, (lrand()-0.5)*0.15);
           }
@@ -1004,6 +1020,28 @@ function scatterOvergrowth(maze) {
           const s = 0.5 + lrand()*0.9;
           pushT(fungusT, fx + Math.cos(ang)*dd, 0.03 + lrand()*0.22, fz + Math.sin(ang)*dd, lrand()*Math.PI, s);
         }
+      }
+    }
+  }
+
+  // ---- VINES HANGING FROM THE EDGES OF LIGHT FIXTURES ----
+  for (const lp of levelLightPositions) {
+    if (lrand() > 0.45 * depthF) continue;
+    const cnt = 1 + (lrand()*3|0);
+    for (let k = 0; k < cnt; k++) {
+      // pick a point along the lamp's EDGE (perimeter), not its center
+      const edge = lrand();
+      let ex, ez;
+      const hw = lp.hw || 0.7, hd = lp.hd || 0.25;
+      if (edge < 0.5) { ex = lp.x + (lrand()<0.5?-hw:hw); ez = lp.z + (lrand()-0.5)*2*hd; }
+      else            { ex = lp.x + (lrand()-0.5)*2*hw; ez = lp.z + (lrand()<0.5?-hd:hd); }
+      const topY = lp.y != null ? lp.y : (WALL_H - 0.1);
+      const len = isAtrium ? (1.5 + lrand()*4.0) : (0.8 + lrand()*1.6);
+      const segs = Math.max(3, Math.floor(len / 0.22));
+      for (let sgi = 0; sgi < segs; sgi++) {
+        const yy = topY - (sgi + 0.5) * (len / segs);
+        const wob = Math.sin(sgi * 0.6) * 0.06;
+        pushT(vineT, ex + wob, yy, ez, 0, 1, 0, (lrand()-0.5)*0.15);
       }
     }
   }
@@ -1067,16 +1105,17 @@ function scatterCryo(maze) {
         for (let k = 0; k < n; k++) {
           const ix = wx + dx * (CHUNK/2 - 0.15) + (lrand()-0.5) * 0.9;
           const iz = wz + dz * (CHUNK/2 - 0.15) + (lrand()-0.5) * 0.9;
-          const len = 0.4 + lrand() * 1.2 * depthF;   // much longer now
-          const thick = 0.8 + lrand() * 0.6;           // variable girth
-          pushT(iceT, ix, WALL_H - len/2, iz, lrand()*Math.PI, thick, len/0.5, thick);
+          // longer drapes on atrium floors so they reach down from the high ceiling
+          const len = (isAtrium ? 1.5 + lrand() * 3.5 : 0.4 + lrand() * 1.2) * depthF;
+          const thick = 0.8 + lrand() * 0.6;
+          pushT(iceT, ix, ceilingH - len/2, iz, lrand()*Math.PI, thick, len/0.5, thick);
         }
       }
       // extra big icicles in corners (2+ walls)
       if (walls.length >= 2 && lrand() < 0.7 * depthF) {
-        const len = 0.8 + lrand() * 1.6 * depthF;
+        const len = (isAtrium ? 2.0 + lrand()*4.0 : 0.8 + lrand() * 1.6) * depthF;
         const thick = 1.0 + lrand() * 0.8;
-        pushT(iceT, wx + (lrand()-0.5)*0.4, WALL_H - len/2, wz + (lrand()-0.5)*0.4,
+        pushT(iceT, wx + (lrand()-0.5)*0.4, ceilingH - len/2, wz + (lrand()-0.5)*0.4,
           lrand()*Math.PI, thick, len/0.5, thick);
       }
 
@@ -1103,6 +1142,21 @@ function scatterCryo(maze) {
     }
   }
 
+  // ---- ICICLES HANGING FROM LIGHT FIXTURES (and some really big ones) ----
+  for (const lp of levelLightPositions) {
+    if (lrand() > 0.5 * depthF) continue;
+    const cnt = 2 + (lrand()*4|0);
+    const hw = lp.hw || 0.7, hd = lp.hd || 0.25;
+    const topY = lp.y != null ? lp.y : (WALL_H - 0.1);
+    for (let k = 0; k < cnt; k++) {
+      const ix = lp.x + (lrand()-0.5)*2*hw, iz = lp.z + (lrand()-0.5)*2*hd;
+      const big = lrand() < 0.18;
+      const len = big ? (2.5 + lrand()*4.0) * depthF : (0.5 + lrand()*1.2) * depthF;
+      const thick = big ? (1.4 + lrand()*1.2) : (0.7 + lrand()*0.5);
+      pushT(iceT, ix, topY - len/2, iz, lrand()*Math.PI, thick, len/0.5, thick);
+    }
+  }
+
   const g = new THREE.Group();
   // icicle: a fatter, longer cone pointing down
   const icicleGeo = new THREE.ConeGeometry(0.07, 0.5, 5); icicleGeo.rotateX(Math.PI);
@@ -1112,7 +1166,7 @@ function scatterCryo(maze) {
     new THREE.MeshStandardMaterial({ color: 0xdcebf5, roughness: 0.6, flatShading: true }), frostT);
 
   // irregular ice sheet: jitter a circle geometry so it reads as a natural puddle
-  const sheetGeo = makeIrregularIceGeo(); sheetGeo.rotateX(-Math.PI / 2);
+  const sheetGeo = makeIrregularIceGeo();   // already flat in XZ — no rotation needed
   buildInstanced(g, sheetGeo,
     new THREE.MeshStandardMaterial({ color: 0xbcd8ec, roughness: 0.15, metalness: 0.25, transparent: true, opacity: 0.45, side: THREE.DoubleSide }), sheetT);
 
@@ -1152,7 +1206,7 @@ function scatterFlooded(maze) {
     }
   }
   if (puddleT.length) {
-    const pg = makeIrregularIceGeo(); pg.rotateX(-Math.PI/2);   // reuse irregular blob shape
+    const pg = makeIrregularIceGeo();   // already flat in XZ — no rotation needed
     const pmat = new THREE.MeshStandardMaterial({
       color: 0x0a2a30, roughness: 0.06, metalness: 0.7,
       transparent: true, opacity: 0.82, side: THREE.DoubleSide,
@@ -1174,7 +1228,7 @@ function scatterFlooded(maze) {
         const dx = cx*CHUNK + CHUNK/2 + (lrand()-0.5)*CHUNK*0.7;
         const dz = cy*CHUNK + CHUNK/2 + (lrand()-0.5)*CHUNK*0.7;
         const len = 0.3 + lrand()*0.6;
-        dummy.position.set(dx, WALL_H - len/2, dz);
+        dummy.position.set(dx, ceilingH - len/2, dz);   // hang from the real ceiling
         dummy.rotation.set(0,0,0);
         dummy.scale.set(1, len/0.4, 1);
         dummy.updateMatrix(); streakT.push(dummy.matrix.clone());
@@ -1207,8 +1261,8 @@ function setupFloodDrips(spawns) {
   const drops = [];
   for (let i = 0; i < maxDrops; i++) {
     const s = spawns[(Math.random()*spawns.length)|0];
-    positions[i*3] = s.x; positions[i*3+1] = WALL_H - 0.4 - Math.random()*1.5; positions[i*3+2] = s.z;
-    drops.push({ x: s.x, z: s.z, vy: -1.2 - Math.random()*1.0, delay: Math.random()*3 });
+    positions[i*3] = s.x; positions[i*3+1] = ceilingH - 0.4 - Math.random()*1.5; positions[i*3+2] = s.z;
+    drops.push({ x: s.x, z: s.z, vy: -1.2 - Math.random()*1.0, delay: Math.random()*3, top: ceilingH - 0.4 });
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -1235,7 +1289,7 @@ function updateFloodedWater(dt) {
     p[i*3+1] += dr.vy * dt;
     if (p[i*3+1] <= 0.05) {
       // hit the water: reset to the ceiling with a small delay
-      p[i*3+1] = WALL_H - 0.4;
+      p[i*3+1] = dr.top != null ? dr.top : (WALL_H - 0.4);
       dr.delay = 0.3 + Math.random()*2.5;
     }
   }
@@ -1281,7 +1335,7 @@ function setupCryoParticles() {
   // scatter motes in a box around the player's starting position
   for (let i = 0; i < count; i++) {
     positions[i*3]     = pos.x + (Math.random() - 0.5) * 14;
-    positions[i*3 + 1] = Math.random() * WALL_H;
+    positions[i*3 + 1] = Math.random() * ceilingH;
     positions[i*3 + 2] = pos.z + (Math.random() - 0.5) * 14;
     // slow random drift
     velocities.push({
@@ -1326,7 +1380,7 @@ function updateCryoParticles(dt) {
     if (p[i3 + 2] < pos.z - range) p[i3 + 2] = pos.z + range;
     if (p[i3 + 2] > pos.z + range) p[i3 + 2] = pos.z - range;
     // wrap vertically
-    if (p[i3 + 1] < 0) { p[i3 + 1] = WALL_H; v[i].vy = -0.02 - Math.random() * 0.08; }
+    if (p[i3 + 1] < 0) { p[i3 + 1] = ceilingH; v[i].vy = -0.02 - Math.random() * 0.08; }
 
     // gentle random wobble
     v[i].vx += (Math.random() - 0.5) * 0.15 * dt;
@@ -1356,13 +1410,6 @@ const BIOMES = {
     bg: 0x8fa6b4, ambient: 0x9fc0d6, ambientI: 0.22,
     lightColor: 0xcfe6ff, deadRate: 0.34,
   },
-  flooded: {
-    name: 'FLOODED SUB-LEVEL',
-    floorTint: [0.6,0.82,0.9], wallTint: [0.66,0.84,0.9], ceilTint: [0.62,0.78,0.84],
-    fog: 0x0e3038, fogMul: 2.0,
-    bg: 0x0a2228, ambient: 0x2a6a72, ambientI: 0.16,
-    lightColor: 0x9fe6ff, deadRate: 0.55,
-  },
   overgrowth: {
     name: 'OVERGROWTH',
     floorTint: [0.78,1.0,0.72], wallTint: [0.8,1.02,0.74], ceilTint: [0.76,0.95,0.7],
@@ -1371,7 +1418,7 @@ const BIOMES = {
     lightColor: 0xd6f0b0, deadRate: 0.45,
   },
 };
-const BIOME_POOL = ['cold','flooded','overgrowth'];   // floor 1 is always cleanroom
+const BIOME_POOL = ['cold','overgrowth'];   // floor 1 is always cleanroom
 let currentBiomeKey = 'cleanroom';
 let currentBiome = BIOMES.cleanroom;
 
@@ -1387,6 +1434,14 @@ function resolveBiome() {
   }
   currentBiomeKey = key;
   currentBiome = BIOMES[key] || BIOMES.cleanroom;
+}
+
+// Decide if this floor is a tall "atrium" (vaulted) type. Seed-derived, never
+// floor 1, ~28% chance otherwise. Custom Sandbox can force it on/off.
+function resolveAtrium() {
+  // Every floor is now a tall atrium (the toggle was removed).
+  isAtrium = true;
+  ceilingH = 9.5;
 }
 
 // multiply an [r,g,b] pixel by a biome tint triple
@@ -1418,13 +1473,6 @@ function buildTextures() {
     TEX.wallGreen = makeCryoWall('green');
     TEX.wallRed = makeCryoWall('red');
     TEX.wallPlain = makeCryoWall('none');
-  } else if (b === 'flooded') {
-    TEX.carpet = [makeFloodedFloor(0), makeFloodedFloor(1), makeFloodedFloor(2)];
-    TEX.ceiling = makeFloodedCeiling();
-    TEX.wallBlue = makeFloodedWall('blue');
-    TEX.wallGreen = makeFloodedWall('green');
-    TEX.wallRed = makeFloodedWall('red');
-    TEX.wallPlain = makeFloodedWall('none');
   } else {
     TEX.carpet = [makeCarpet(0), makeCarpet(1), makeCarpet(2)];
     TEX.ceiling = makeCeiling();
@@ -1837,6 +1885,8 @@ function buildLevel() {
   clearAllKeycards();
   teardownCryoParticles();
   teardownFlooded();
+  teardownShadowFlyer();
+  teardownAmbientBugs();
   cellMeshGroup = new THREE.Group();
   scene.add(cellMeshGroup);
 
@@ -1846,6 +1896,8 @@ function buildLevel() {
 
   // resolve which biome this floor uses (seed-derived; floor 1 always Cleanroom)
   resolveBiome();
+  // resolve whether this is a tall "atrium" floor (seed-derived; never floor 1)
+  resolveAtrium();
   // (re)build textures for this biome — each biome paints its surfaces differently
   buildTextures();
 
@@ -1878,13 +1930,32 @@ function buildLevel() {
   floor.position.set(gridW * CHUNK / 2, 0, gridH * CHUNK / 2);
   cellMeshGroup.add(floor);
 
+  // ---- Outer boundary shell ----
+  // If a player climbs furniture and jumps, they can see over the maze walls. Wrap
+  // the level in an oversized floor extension + a tall perimeter wall ring so they
+  // only ever see "more facility fading into fog", never the edge of the world.
+  buildBoundaryShell(fTex);
+
   // ---- Ceiling ----
+  // Both normal and atrium floors get a textured ceiling. On atrium floors it sits
+  // far overhead and fades into the biome fog/murk. We also oversize it well past
+  // the maze edges so you never see where it ends (which would break the illusion).
   const ceilTex = TEX.ceiling;
   ceilTex.repeat.set(gridW, gridH); ceilTex.needsUpdate = true;
-  const ceil = new THREE.Mesh(floorGeo.clone(), new THREE.MeshStandardMaterial({ map: ceilTex, roughness: 1 }));
+  let ceilGeo = floorGeo.clone();
+  if (isAtrium) {
+    // a much larger plane whose edges are lost in the fog
+    const over = Math.max(gridW, gridH) * CHUNK * 1.5;
+    ceilGeo = new THREE.PlaneGeometry((gridW * CHUNK) + over * 2, (gridH * CHUNK) + over * 2);
+    ceilTex.repeat.set(gridW + (over*2/CHUNK), gridH + (over*2/CHUNK)); ceilTex.needsUpdate = true;
+  }
+  const ceil = new THREE.Mesh(ceilGeo, new THREE.MeshStandardMaterial({ map: ceilTex, roughness: 1 }));
   ceil.rotation.x = Math.PI / 2;
-  ceil.position.set(gridW * CHUNK / 2, WALL_H, gridH * CHUNK / 2);
+  ceil.position.set(gridW * CHUNK / 2, ceilingH, gridH * CHUNK / 2);
   cellMeshGroup.add(ceil);
+
+  // ---- Atrium structure: tall pillars rising into the fog (no overhead beams) ----
+  if (isAtrium) buildAtriumStructure();
 
   // ---- Walls ----
   // We instance per-zone material; build one merged-ish approach via individual boxes.
@@ -1924,6 +1995,7 @@ function buildLevel() {
   // ---- Overhead fluorescents: biome-tinted, many failed ----
   const lightCount = Math.floor(gridW * gridH * 0.10) + 5;
   const lc = currentBiome.lightColor, deadRate = currentBiome.deadRate;
+  levelLightPositions = [];   // record fixtures so biome scatter can hang from them
   for (let n = 0; n < lightCount; n++) {
     const gx = (lrand() * gridW) | 0;
     const gy = (lrand() * gridH) | 0;
@@ -1931,17 +2003,49 @@ function buildLevel() {
     const lz = gy * CHUNK + CHUNK / 2;
     const dead = lrand() < deadRate;
     const glitch = !dead && lrand() < 0.45;
-    const fixture = new THREE.Mesh(
-      new THREE.BoxGeometry(1.5, 0.06, 0.55),
+
+    // ---- Physical lamp: a dark metal housing with a glowing panel underneath ----
+    const FW = 1.4, FD = 0.5, FH = 0.22;   // fixture width / depth / housing height
+    const lampGroup = new THREE.Group();
+    const housing = new THREE.Mesh(
+      new THREE.BoxGeometry(FW, FH, FD),
+      new THREE.MeshStandardMaterial({ color: 0x2b3033, roughness: 0.8, metalness: 0.4, flatShading: true })
+    );
+    housing.position.y = 0; lampGroup.add(housing);
+    // the glowing element on the underside (this is what flickers)
+    const panel = new THREE.Mesh(
+      new THREE.BoxGeometry(FW - 0.12, 0.05, FD - 0.12),
       new THREE.MeshBasicMaterial({ color: dead ? 0x3a4042 : lc })
     );
-    fixture.position.set(lx, WALL_H - 0.06, lz);
-    cellMeshGroup.add(fixture);
+    panel.position.y = -FH/2 - 0.02; lampGroup.add(panel);
+    lampGroup.position.set(lx, WALL_H - FH/2 - 0.04, lz);
+    cellMeshGroup.add(lampGroup);
+    const fixture = panel;   // flicker drives the glowing panel
+    // record position + half-extent so scatter can hang from the EDGE of the lamp
+    levelLightPositions.push({ x: lx, z: lz, hw: FW/2, hd: FD/2, y: WALL_H - FH - 0.06 });
+    // collidable hanging lamp: a box you can bump into / land on, with vertical extent
+    obstacles.push({
+      type: 'block',
+      minX: lx - FW/2, maxX: lx + FW/2,
+      minZ: lz - FD/2, maxZ: lz + FD/2,
+      top: WALL_H, minY: WALL_H - FH - 0.1,   // only solid around the housing height
+    });
+
+    // On atrium floors, hang the lamp from a cord rising to the ceiling.
+    if (isAtrium) {
+      const cordH = ceilingH - WALL_H + 0.5;
+      const cord = new THREE.Mesh(
+        new THREE.BoxGeometry(0.05, cordH, 0.05),
+        new THREE.MeshBasicMaterial({ color: 0x202427 })
+      );
+      cord.position.set(lx, WALL_H + cordH / 2 - 0.06, lz);
+      cellMeshGroup.add(cord);
+    }
     const base = dead ? 0 : 1.25;
     const pl = new THREE.PointLight(lc, base, CHUNK * 3.6, 2);
     pl.position.set(lx, WALL_H - 0.3, lz);
     cellMeshGroup.add(pl);
-    flickerLights.push({ light: pl, mesh: fixture, base, glitch, dead, t: Math.random() * 10 });
+    flickerLights.push({ light: pl, mesh: fixture, base, glitch, dead, t: Math.random() * 10, wx: lx, wz: lz });
   }
 
   // biome ambient light (set per floor)
@@ -1952,7 +2056,7 @@ function buildLevel() {
   placeFurniture(maze);
   scatterOvergrowth(maze);   // overgrowth biome: add vines/ferns/fungus
   scatterCryo(maze);         // cold biome: add icicles/frost/ice sheets
-  scatterFlooded(maze);      // flooded biome: water plane + debris
+  setupAmbientBugs();        // ambient flying bugs (atmosphere)
 
   // ---- Emergency exit at the deepest dead-end ----
   buildGateway(maze);
@@ -1962,7 +2066,9 @@ function buildLevel() {
   velY = 0; onGround = true; yaw = Math.random() * Math.PI * 2; pitch = 0;
 
   // biome-driven haze + background colour
-  const fogDensity = 0.11 * currentBiome.fogMul * (customConfig.active ? customConfig.fog : 1);
+  let fogDensity = 0.11 * currentBiome.fogMul * (customConfig.active ? customConfig.fog : 1);
+  // atrium floors: thicken the haze a bit so the tall ceiling fades into murk overhead
+  if (isAtrium) fogDensity *= 1.3;
   scene.fog = new THREE.FogExp2(currentBiome.fog, fogDensity);
   scene.background = new THREE.Color(currentBiome.bg);
 }
@@ -2290,6 +2396,251 @@ function buildGateway(maze) {
   gl.position.set(cx, 2.2, cz);
   cellMeshGroup.add(gl);
   gateway.userData.cx = cx; gateway.userData.cz = cz;
+}
+
+// ============================================================
+// AMBIENT BUGS — tiny dark motes that dart around near the player (atmosphere only)
+// ============================================================
+let ambientBugs = null;
+function setupAmbientBugs() {
+  teardownAmbientBugs();
+  const count = 40;
+  const positions = new Float32Array(count * 3);
+  const bugs = [];
+  for (let i = 0; i < count; i++) {
+    positions[i*3]     = pos.x + (Math.random()-0.5) * 10;
+    positions[i*3 + 1] = 0.5 + Math.random() * 2.2;
+    positions[i*3 + 2] = pos.z + (Math.random()-0.5) * 10;
+    bugs.push({
+      vx: (Math.random()-0.5)*1.2, vy: (Math.random()-0.5)*0.6, vz: (Math.random()-0.5)*1.2,
+      // each bug has its own little wander timer
+      wander: Math.random()*2,
+    });
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  const mat = new THREE.PointsMaterial({ color: 0x15140f, size: 0.045, transparent: true, opacity: 0.8, depthWrite: false });
+  const pts = new THREE.Points(geo, mat);
+  scene.add(pts);
+  ambientBugs = { pts, geo, bugs, count };
+}
+function teardownAmbientBugs() {
+  if (ambientBugs) { scene.remove(ambientBugs.pts); ambientBugs.geo.dispose(); ambientBugs.pts.material.dispose(); ambientBugs = null; }
+}
+function updateAmbientBugs(dt) {
+  if (!ambientBugs) return;
+  const p = ambientBugs.geo.attributes.position.array;
+  const range = 8;
+  for (let i = 0; i < ambientBugs.count; i++) {
+    const b = ambientBugs.bugs[i], i3 = i*3;
+    // erratic insect motion: randomly change velocity in little bursts
+    b.wander -= dt;
+    if (b.wander <= 0) {
+      b.vx = (Math.random()-0.5)*1.6; b.vy = (Math.random()-0.5)*0.8; b.vz = (Math.random()-0.5)*1.6;
+      b.wander = 0.2 + Math.random()*0.8;
+    }
+    p[i3]   += b.vx * dt; p[i3+1] += b.vy * dt; p[i3+2] += b.vz * dt;
+    // keep them in a height band and wrapped near the player
+    if (p[i3+1] < 0.3) { p[i3+1] = 0.3; b.vy = Math.abs(b.vy); }
+    if (p[i3+1] > 2.6) { p[i3+1] = 2.6; b.vy = -Math.abs(b.vy); }
+    if (p[i3]   < pos.x - range) p[i3]   = pos.x + range;
+    if (p[i3]   > pos.x + range) p[i3]   = pos.x - range;
+    if (p[i3+2] < pos.z - range) p[i3+2] = pos.z + range;
+    if (p[i3+2] > pos.z + range) p[i3+2] = pos.z - range;
+  }
+  ambientBugs.geo.attributes.position.needsUpdate = true;
+}
+
+// ============================================================
+// SHADOW FLYER — a rare dark shape that crosses high overhead. Pure scare:
+// no collision, no catch, just an ominous silhouette + screen shake + sound.
+// ============================================================
+function buildShadowShape() {
+  // a jagged, winged dark silhouette — semi-transparent black, unlit, so it reads
+  // as a hazy shadow/absence passing over rather than a hard solid object.
+  const g = new THREE.Group();
+  const mat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.45, side: THREE.DoubleSide, depthWrite: false });
+  // central body
+  const body = new THREE.Mesh(new THREE.SphereGeometry(1.2, 6, 4), mat);
+  body.scale.set(1.6, 0.5, 2.6); g.add(body);
+  // wings on pivot groups at the body center so they can actually flap
+  const wings = [];
+  for (const sgn of [-1, 1]) {
+    const pivot = new THREE.Group();
+    g.add(pivot);
+    const wing = new THREE.Mesh(new THREE.ConeGeometry(0.9, 5.5, 3), mat);
+    wing.rotation.z = sgn * Math.PI / 2;
+    wing.rotation.y = sgn * 0.5;
+    wing.scale.set(1, 1, 0.25);
+    wing.position.set(sgn * 3.2, 0, -0.5);
+    pivot.add(wing);
+    pivot.userData.sgn = sgn;
+    wings.push(pivot);
+  }
+  // trailing tendrils
+  for (let i = 0; i < 3; i++) {
+    const t = new THREE.Mesh(new THREE.ConeGeometry(0.25, 2.5, 3), mat);
+    t.rotation.x = -Math.PI / 2;
+    t.position.set((i - 1) * 0.6, 0, 2.4);
+    g.add(t);
+  }
+  g.userData.wings = wings;
+  g.visible = false;
+  return g;
+}
+
+function triggerShadowFlyover() {
+  if (!shadowFlyer) { shadowFlyer = buildShadowShape(); scene.add(shadowFlyer); }
+  const W = gridW * CHUNK, H = gridH * CHUNK;
+  // fly high above, across the whole map in a random straight line
+  // Height: it must be BELOW the ceiling to be visible. On normal low floors it
+  // skims just under the ceiling; in tall atriums it soars high in the open space.
+  const yFly = isAtrium ? (WALL_H + 4 + Math.random() * 3) : (WALL_H - 0.5);
+  const edge = Math.random() < 0.5;
+  // enter from well BEYOND the map border and exit far past the other side, so it
+  // emerges from the distance, drifts across, and recedes.
+  const off = Math.max(W, H) * 0.6 + 14;
+  let from, to;
+  if (edge) {
+    const x1 = Math.random() * W, x2 = Math.random() * W;
+    from = { x: x1, z: -off }; to = { x: x2, z: H + off };
+  } else {
+    const z1 = Math.random() * H, z2 = Math.random() * H;
+    from = { x: -off, z: z1 }; to = { x: W + off, z: z2 };
+  }
+  shadowFlyer.userData.fly = {
+    from, to, y: yFly, t: 0,
+    dur: 7 + Math.random() * 4,    // slower crossing (was 3.5-5.5s)
+  };
+  shadowFlyer.visible = true;
+  // scale to the space: smaller under low ceilings, full size in tall atriums
+  const fscale = isAtrium ? 1.0 : 0.5;
+  shadowFlyer.userData.baseScale = fscale;
+  shadowFlyer.scale.set(fscale, fscale, fscale);
+  // face direction of travel
+  shadowFlyer.rotation.y = Math.atan2(to.x - from.x, to.z - from.z);
+  playShadowSound();
+}
+
+function playShadowSound() {
+  if (!audio) return;
+  try {
+    const { ctx, master } = audio;
+    // a low, swelling whoosh + sub rumble
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sine'; o.frequency.setValueAtTime(70, ctx.currentTime);
+    o.frequency.exponentialRampToValueAtTime(40, ctx.currentTime + 2.5);
+    g.gain.setValueAtTime(0.0001, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.4, ctx.currentTime + 1.0);
+    g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 3.0);
+    o.connect(g); g.connect(master); o.start(); o.stop(ctx.currentTime + 3.1);
+    // airy noise whoosh
+    const nlen = ctx.sampleRate * 3;
+    const nbuf = ctx.createBuffer(1, nlen, ctx.sampleRate);
+    const nd = nbuf.getChannelData(0);
+    for (let i = 0; i < nlen; i++) nd[i] = (Math.random()*2-1) * Math.sin((i/nlen)*Math.PI);
+    const ns = ctx.createBufferSource(); ns.buffer = nbuf;
+    const bp = ctx.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 500; bp.Q.value = 0.7;
+    const ng = ctx.createGain(); ng.gain.value = 0.18;
+    ns.connect(bp); bp.connect(ng); ng.connect(master); ns.start();
+  } catch (e) {}
+}
+
+function updateShadowFlyer(dt) {
+  // tick down the timer; rarely trigger a flyover
+  if (!shadowFlyer || !shadowFlyer.visible) {
+    shadowFlyerTimer -= dt;
+    if (shadowFlyerTimer <= 0) {
+      // ~ once every 60-140s, and only sometimes even then (rare + unpredictable)
+      shadowFlyerTimer = 60 + Math.random() * 80;
+      if (Math.random() < 0.6) triggerShadowFlyover();
+    }
+    return;
+  }
+  // animate the active flyover
+  const f = shadowFlyer.userData.fly;
+  f.t += dt / f.dur;
+  if (f.t >= 1) { shadowFlyer.visible = false; return; }
+  const x = f.from.x + (f.to.x - f.from.x) * f.t;
+  const z = f.from.z + (f.to.z - f.from.z) * f.t;
+  // gentle vertical sway as it passes
+  const y = f.y + Math.sin(f.t * Math.PI * 2) * 0.8;
+  shadowFlyer.position.set(x, y, z);
+  // real wing flap: rotate the wing pivots up and down
+  const wings = shadowFlyer.userData.wings;
+  if (wings) {
+    const flap = Math.sin(f.t * Math.PI * 10) * 0.5;
+    for (const w of wings) w.rotation.z = w.userData.sgn * flap;
+  }
+  const bs = shadowFlyer.userData.baseScale || 1;
+  shadowFlyer.scale.set(bs, bs, bs);
+
+  // screen shake + dimming when it passes near overhead (close in XZ to the player)
+  const dxp = x - pos.x, dzp = z - pos.z;
+  const horizDist = Math.hypot(dxp, dzp);
+  if (horizDist < 8) {
+    const closeness = 1 - horizDist / 8;
+    shakeAmount = Math.max(shakeAmount, 0.06 * closeness);
+  }
+}
+
+function teardownShadowFlyer() {
+  if (shadowFlyer) { scene.remove(shadowFlyer); shadowFlyer = null; }
+  shadowFlyerTimer = 25 + Math.random() * 30;
+}
+
+// Wrap the level so players who climb + jump never see the edge of the world.
+// An oversized floor extension all around, plus a tall perimeter wall ring set
+// just outside the maze, rising high and fading into the fog.
+function buildBoundaryShell(fTex) {
+  const W = gridW * CHUNK, H = gridH * CHUNK;
+  const ext = Math.max(gridW, gridH) * CHUNK * 1.4;   // how far the world extends out
+  const wallTop = Math.max(ceilingH + 4, 14);          // tall enough to hide behind from a jump
+
+  // --- outer floor extension: a big ring plane under everything ---
+  const bigGeo = new THREE.PlaneGeometry(W + ext * 2, H + ext * 2);
+  const bigTex = fTex.clone(); bigTex.needsUpdate = true;
+  bigTex.repeat.set((W + ext*2) / CHUNK, (H + ext*2) / CHUNK);
+  const bigFloor = new THREE.Mesh(bigGeo, new THREE.MeshStandardMaterial({ map: bigTex, roughness: 1 }));
+  bigFloor.rotation.x = -Math.PI / 2;
+  bigFloor.position.set(W/2, -0.05, H/2);   // just below the real floor
+  cellMeshGroup.add(bigFloor);
+
+  // --- perimeter wall ring (4 tall walls) set out beyond the maze ---
+  const mat = new THREE.MeshStandardMaterial({ map: TEX.wallPlain, roughness: 1 });
+  const back = ext * 0.6;   // distance of the ring from the maze edge
+  const ringW = W + back * 2;
+  const segs = [
+    // [w, h, d, x, y, z]
+    [ringW, wallTop, WALL_T, W/2, wallTop/2, -back],          // north
+    [ringW, wallTop, WALL_T, W/2, wallTop/2, H + back],       // south
+    [WALL_T, wallTop, H + back*2, -back, wallTop/2, H/2],     // west
+    [WALL_T, wallTop, H + back*2, W + back, wallTop/2, H/2],  // east
+  ];
+  for (const [w, h, d, x, y, z] of segs) {
+    const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+    m.position.set(x, y, z);
+    cellMeshGroup.add(m);
+  }
+}
+
+// Tall vertical structure for atrium floors: pillars rising up into the dark void.
+function buildAtriumStructure() {
+  const g = new THREE.Group();
+  const pillarMat = new THREE.MeshStandardMaterial({ color: 0x4a4f52, roughness: 0.9, flatShading: true });
+  const pillarH = ceilingH;
+
+  for (let gy = 2; gy < gridH - 1; gy += 2) {
+    for (let gx = 2; gx < gridW - 1; gx += 2) {
+      if (lrand() < 0.45) {
+        const px = gx * CHUNK, pz = gy * CHUNK;
+        const pillar = new THREE.Mesh(new THREE.BoxGeometry(0.5, pillarH, 0.5), pillarMat);
+        pillar.position.set(px, pillarH / 2, pz);
+        g.add(pillar);
+      }
+    }
+  }
+  cellMeshGroup.add(g);
 }
 
 function disposeGroup(group) {
@@ -3409,12 +3760,19 @@ function collideAxis(nx, nz, useX) {
   // and begin to fall, you aren't instantly re-blocked by the side you just left —
   // you clear the footprint and drop cleanly instead of getting pinned.
   const feet = pos.y - EYE_H;
-  const STEP_TOL = 0.35;
+  const STEP_TOL = 0.45;
   for (let i = 0; i < obstacles.length; i++) {
     const o = obstacles[i];
     if (testX + PLAYER_R > o.minX && testX - PLAYER_R < o.maxX &&
         testZ + PLAYER_R > o.minZ && testZ - PLAYER_R < o.maxZ) {
-      if (feet < o.top - STEP_TOL) return false;   // well below the surface -> blocked
+      if (o.minY != null) {
+        // hanging obstacle (e.g. a lamp): only solid between minY and top. Block if
+        // any part of the player's body (feet..head) overlaps that vertical band.
+        const head = feet + EYE_H;
+        if (head > o.minY && feet < o.top) return false;
+      } else if (feet < o.top - STEP_TOL) {
+        return false;   // floor-standing obstacle: blocks until you're up on top
+      }
     }
   }
   return true;
@@ -4100,6 +4458,7 @@ function initInput() {
     keys[e.code] = true;
     if (e.code === 'KeyF') { flashlightOn = !flashlightOn; flashlight.intensity = flashlightOn ? 3.0 : 0; }
     if (e.code === 'F8') { e.preventDefault(); exportBugReport(); }
+    if (e.code === 'F9') { e.preventDefault(); triggerShadowFlyover(); }   // test: force flyover
     if (e.code === 'KeyQ' && !e.repeat) openEmoteWheel();
     if (e.code === 'KeyG' && !e.repeat) dropGlowstick();
     if (e.code === 'KeyC' && !e.repeat) toggleCrouch();
@@ -4224,6 +4583,20 @@ function initTouch() {
   sprintBtn.addEventListener('pointerup', sprintOff);
   sprintBtn.addEventListener('pointercancel', sprintOff);
   sprintBtn.addEventListener('pointerleave', sprintOff);
+
+  // crouch (toggle), hide/leave locker (toggle), and drop glowstick
+  const crouchBtn = document.getElementById('btn-crouch');
+  crouchBtn.addEventListener('pointerdown', e => {
+    e.preventDefault(); toggleCrouch();
+    crouchBtn.classList.toggle('on', crouching);
+  });
+  const hideBtn = document.getElementById('btn-hide');
+  hideBtn.addEventListener('pointerdown', e => {
+    e.preventDefault(); toggleHide();
+    hideBtn.classList.toggle('on', hiding);
+  });
+  const glowBtn = document.getElementById('btn-glow');
+  glowBtn.addEventListener('pointerdown', e => { e.preventDefault(); dropGlowstick(); });
 
   const pauseBtn = document.getElementById('btn-pause');
   pauseBtn.addEventListener('pointerdown', e => {
@@ -4890,7 +5263,7 @@ function beginLevel() {
   if (customConfig.active) {
     wantEntity = customConfig.entityOn && customConfig.monsters > 0;
   } else {
-    wantEntity = level >= 3;
+    wantEntity = level >= 1;
   }
   if (wantEntity) spawnEntity();
   else removeEntity();
@@ -5081,7 +5454,7 @@ function drawMinimap() {
     // center on player, rotate so facing (yaw) points up, then draw the map at its
     // normal coordinates (offset by pad). All map art below is unchanged.
     mmCtx.translate(full / 2, full / 2);
-    mmCtx.rotate(-yaw);
+    mmCtx.rotate(yaw);
     mmCtx.translate(-(pcx + pad), -(pcy + pad));
     mmCtx.translate(pad, pad);
   } else {
@@ -5166,21 +5539,29 @@ function drawMinimap() {
     mmCtx.restore();
   }
 
-  // player marker — drawn in map space at the player's true position
-  mmCtx.fillStyle = '#fff';
-  mmCtx.beginPath();
-  mmCtx.arc(pcx, pcy, Math.max(2, cell * 0.22), 0, Math.PI * 2);
-  mmCtx.fill();
-  // facing line: in forward-up mode the map is rotated so "up" = facing, so draw
-  // straight up; otherwise draw along yaw.
-  mmCtx.strokeStyle = '#fff'; mmCtx.lineWidth = Math.max(1, cell * 0.1);
-  mmCtx.beginPath(); mmCtx.moveTo(pcx, pcy);
+  // player marker — draw in SCREEN space (reset transform) so the facing arrow
+  // always points up on screen, not in rotated map space.
   if (minimapForwardUp) {
-    mmCtx.lineTo(pcx, pcy - cell * 0.6);
+    mmCtx.setTransform(1, 0, 0, 1, 0, 0);
+    const cxs = mmCanvas.width / 2, cys = mmCanvas.height / 2;
+    mmCtx.fillStyle = '#fff';
+    mmCtx.beginPath();
+    mmCtx.arc(cxs, cys, Math.max(2, cell * 0.22), 0, Math.PI * 2);
+    mmCtx.fill();
+    mmCtx.strokeStyle = '#fff'; mmCtx.lineWidth = Math.max(1, cell * 0.1);
+    mmCtx.beginPath(); mmCtx.moveTo(cxs, cys);
+    mmCtx.lineTo(cxs, cys - cell * 0.6);   // always straight up on screen
+    mmCtx.stroke();
   } else {
+    mmCtx.fillStyle = '#fff';
+    mmCtx.beginPath();
+    mmCtx.arc(pcx, pcy, Math.max(2, cell * 0.22), 0, Math.PI * 2);
+    mmCtx.fill();
+    mmCtx.strokeStyle = '#fff'; mmCtx.lineWidth = Math.max(1, cell * 0.1);
+    mmCtx.beginPath(); mmCtx.moveTo(pcx, pcy);
     mmCtx.lineTo(pcx - Math.sin(yaw) * cell * 0.5, pcy - Math.cos(yaw) * cell * 0.5);
+    mmCtx.stroke();
   }
-  mmCtx.stroke();
 
   mmCtx.setTransform(1, 0, 0, 1, 0, 0);   // reset for next frame
   mmCanvas.style.transform = 'none';      // no CSS transform — rotation is in-canvas
@@ -5211,6 +5592,8 @@ function tick() {
   updateKeycards(dt);
   updateCryoParticles(dt);
   updateFloodedWater(dt);
+  updateShadowFlyer(dt);
+  updateAmbientBugs(dt);
   bugSample(dt);
   updateHidePrompt();
   // animate locker doors. The door is modeled CLOSED at rotation 0 (louvers flat
@@ -5292,8 +5675,11 @@ function update(dt) {
   const fx = pos.x, fz = pos.z;
   const feetNow = pos.y - EYE_H;
   for (const o of obstacles) {
-    if (fx > o.minX && fx < o.maxX && fz > o.minZ && fz < o.maxZ) {
-      if (feetNow >= o.top - 0.35) groundY = Math.max(groundY, o.top + EYE_H);
+    // support if any part of the player's footprint (radius) overlaps the top —
+    // this matches the side-collision footprint so you don't fall-and-stick at edges
+    if (fx + PLAYER_R > o.minX && fx - PLAYER_R < o.maxX &&
+        fz + PLAYER_R > o.minZ && fz - PLAYER_R < o.maxZ) {
+      if (feetNow >= o.top - 0.45) groundY = Math.max(groundY, o.top + EYE_H);
     }
   }
   if (newY <= groundY) { newY = groundY; velY = 0; onGround = true; }
@@ -5314,6 +5700,13 @@ function update(dt) {
   const wantCrouchDrop = (crouching || hiding) ? (EYE_H - CROUCH_EYE) : 0;
   crouchOffset += (wantCrouchDrop - crouchOffset) * Math.min(1, dt * 10);
   camera.position.set(pos.x, pos.y + bob - crouchOffset, pos.z);
+  // screen shake (e.g. when the shadow flyer passes overhead)
+  if (shakeAmount > 0.0005) {
+    camera.position.x += (Math.random() - 0.5) * shakeAmount;
+    camera.position.y += (Math.random() - 0.5) * shakeAmount;
+    camera.position.z += (Math.random() - 0.5) * shakeAmount;
+    shakeAmount *= Math.pow(0.001, dt);   // decay
+  } else shakeAmount = 0;
 
   // --- flashlight follows camera ---
   flashlight.position.copy(camera.position);
