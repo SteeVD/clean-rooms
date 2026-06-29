@@ -371,7 +371,7 @@
         <button id="test-f3" class="corp-testbtn">3</button>
       </div>
     </div>
-    <div id="blocker">VERUMO INTERNAL · AUTHORIZED PERSONNEL ONLY · SOLO OR CO-OP</div>
+    <div id="blocker">VERUMO INTERNAL · AUTHORIZED PERSONNEL ONLY · SOLO OR CO-OP · <span id="version-tag"></span></div>
   </div>
 </div>
 
@@ -583,6 +583,7 @@ const PLAYER_R = 0.32;      // player collision radius
 const EYE_H = 1.55;         // camera eye height
 const MOVE_SPEED = 4.2;
 const SPRINT_MULT = 1.7;
+const GAME_VERSION = '0.9.0';   // bump on any change affecting multiplayer compatibility
 const GRAVITY = 22;
 const JUMP_V = 6.4;
 
@@ -3925,14 +3926,60 @@ function caughtByEntity() {
   }
 
   // multiplayer: you're OUT for the run, but the game continues for others.
-  // (Spectator camera is wired in the next step; for now, show a caught notice
-  //  and keep the world running so you can still see remaining players/minimap.)
+  // Enter SPECTATOR mode — follow a living teammate's perspective.
   paused = false;            // keep rendering the world
-  controlsFrozen = true;     // but you can't move
+  controlsFrozen = true;     // your body can't move
   unlockPointer();
-  // mark myself caught in my own state so the host stops targeting me
   if (db && selfRef) set(ref(db, 'rooms/' + ROOM_ID + '/state/' + myId + '/out'), 1).catch(()=>{});
+  // hide my own local avatar bits if any, and start spectating
+  spectating = true; spectateTarget = null;
+  pickSpectateTarget();
   showCaughtNotice();
+}
+
+// ---- Spectator: follow a living teammate's viewpoint after you're caught ----
+let spectating = false, spectateTarget = null;
+function livingTeammates() {
+  const out = [];
+  for (const id in remotePlayers) {
+    const rp = remotePlayers[id];
+    if (!rp.out) out.push(id);
+  }
+  return out;
+}
+function pickSpectateTarget() {
+  const living = livingTeammates();
+  if (!living.length) { spectateTarget = null; return; }
+  // keep current if still valid, else pick the first
+  if (!spectateTarget || living.indexOf(spectateTarget) < 0) spectateTarget = living[0];
+}
+function cycleSpectateTarget() {
+  const living = livingTeammates();
+  if (!living.length) { spectateTarget = null; return; }
+  const i = living.indexOf(spectateTarget);
+  spectateTarget = living[(i + 1) % living.length];
+}
+function updateSpectator() {
+  if (!spectating) return;
+  pickSpectateTarget();
+  const n = document.getElementById('caught-notice');
+  if (!spectateTarget) {
+    // nobody left alive to watch
+    if (n) n.textContent = 'CAUGHT — NO ONE LEFT TO WATCH';
+    return;
+  }
+  const rp = remotePlayers[spectateTarget];
+  if (!rp) return;
+  if (n) n.textContent = 'SPECTATING ' + (rp.name || 'TEAMMATE') + '  ·  [SPACE] next';
+  // hide the followed player's own avatar so we see cleanly through their eyes
+  for (const id in remotePlayers) {
+    if (remotePlayers[id].group) remotePlayers[id].group.visible =
+      (id !== spectateTarget) && !remotePlayers[id].concealed && !remotePlayers[id].out;
+  }
+  // place the camera at the teammate's eye, looking where they look
+  const eye = (rp.crouch ? CROUCH_EYE : EYE_H);
+  camera.position.set(rp.cur.x, (rp.cur.y || 0) + eye, rp.cur.z);
+  camera.rotation.set(0, rp.cur.yaw, 0, 'YXZ');
 }
 
 let controlsFrozen = false;
@@ -4731,6 +4778,7 @@ function initInput() {
     if (e.code === 'KeyG' && !e.repeat) dropGlowstick();
     if (e.code === 'KeyC' && !e.repeat) toggleCrouch();
     if (e.code === 'KeyE' && !e.repeat) { eDownTime = performance.now(); eMovedWhileHeld = false; }
+    if (e.code === 'Space' && spectating && !e.repeat) { e.preventDefault(); cycleSpectateTarget(); }
     if (e.code === 'Escape') {
       // resume if already paused; otherwise the pointerlock loss will open pause
       if (running && paused && !document.getElementById('pause').classList.contains('hidden')) {
@@ -4970,6 +5018,7 @@ async function enterLobby(mode) {
       worldSeed = (Math.random() * 0x7fffffff) | 0;   // host mints the world seed
       await set(roomRef, {
         host: myId,
+        version: GAME_VERSION,
         seed: worldSeed,
         started: false,
         createdAt: serverTimestamp(),
@@ -4978,6 +5027,12 @@ async function enterLobby(mode) {
     } else {
       // Join an existing room.
       if (!room || !room.host) { setLobbyStatus('NO HOST FOUND — HAVE SOMEONE HOST FIRST'); return; }
+      // version gate: only matching builds can play together (prevents desync)
+      if (room.version !== GAME_VERSION) {
+        setLobbyStatus('VERSION MISMATCH — HOST IS ON ' + (room.version || 'an older build') +
+                       ', YOU ARE ON ' + GAME_VERSION + '. EVERYONE MUST REFRESH TO THE SAME VERSION.');
+        return;
+      }
       // enforce the player cap
       const count = room.players ? Object.keys(room.players).length : 0;
       if (count >= MAX_PLAYERS) { setLobbyStatus('ROOM FULL (' + MAX_PLAYERS + ' MAX) — TRY LATER'); return; }
@@ -5450,7 +5505,7 @@ function updateRemotePlayers(dt) {
     while (dyaw < -Math.PI) dyaw += Math.PI * 2;
     rp.cur.yaw += dyaw * Math.min(1, dt * 12);
     rp.group.position.set(rp.cur.x, rp.cur.y, rp.cur.z);
-    rp.group.rotation.y = rp.cur.yaw;
+    rp.group.rotation.y = rp.cur.yaw + Math.PI;   // avatar front is +Z; player forward is -Z
 
     // walk animation when moving
     const p = rp.parts;
@@ -5467,7 +5522,7 @@ function updateRemotePlayers(dt) {
     // crouch: lower the whole avatar a bit; conceal: hide it (tucked in a locker)
     const wantY = rp.crouch ? -0.55 : 0;
     rp.group.position.y = rp.cur.y + wantY;
-    rp.group.visible = !rp.concealed;
+    rp.group.visible = !rp.concealed && !rp.out;   // hide concealed and caught players
     // keep the name label facing the camera is automatic (Sprite)
   }
 }
@@ -5581,7 +5636,7 @@ function startLevelAt(n) {
   document.getElementById('minimap-wrap').classList.remove('hidden');
   level = n;
   iAmCaught = false; controlsFrozen = false; hideCaughtNotice();
-  crouching = false; hiding = false; hideSpot = null; crouchOffset = 0; grabbedStack = null; exposure = 0; exposureSwooping = false; showHidePrompt(''); showExposureWarning('', 0);
+  crouching = false; hiding = false; hideSpot = null; crouchOffset = 0; grabbedStack = null; exposure = 0; exposureSwooping = false; spectating = false; spectateTarget = null; controlsFrozen = false; showHidePrompt(''); showExposureWarning('', 0);
   beginLevel();
   running = true; paused = false; transitioning = false;
   setTouchUI(true);
@@ -6083,6 +6138,9 @@ function update(dt) {
     updateRemotePlayers(dt);
   }
 
+  // spectator: override the camera to follow a living teammate's viewpoint
+  if (spectating) updateSpectator();
+
   updateHUD();
   drawMinimap();
 }
@@ -6091,6 +6149,8 @@ function update(dt) {
 // [[BOOT]] BOOT
 // ============================================================
 initThree();
+// show the build version on the landing page
+{ const vt = document.getElementById('version-tag'); if (vt) vt.textContent = 'v' + GAME_VERSION; }
 // prime the speech-synth voice list (loads async in some browsers)
 if ('speechSynthesis' in window) {
   speechSynthesis.onvoiceschanged = () => { _voiceCache = null; pickVoice(); };
